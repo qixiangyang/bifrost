@@ -8,10 +8,6 @@ import (
 
 // Vertex AI Embedding API types
 
-const (
-	DefaultVertexAnthropicVersion = "vertex-2023-10-16"
-)
-
 // PhoneticEncoding represents the phonetic encoding of a phrase.
 type PhoneticEncoding string
 

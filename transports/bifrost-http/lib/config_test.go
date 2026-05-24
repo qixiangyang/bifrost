@@ -386,6 +386,7 @@ type MockConfigStore struct {
 	providers        map[schemas.ModelProvider]configstore.ProviderConfig
 	mcpConfig        *schemas.MCPConfig
 	governanceConfig *configstore.GovernanceConfig
+	complexityConfig *configstore.ComplexityAnalyzerConfig
 	authConfig       *configstore.AuthConfig
 	frameworkConfig  *tables.TableFrameworkConfig
 	vectorConfig     *vectorstore.Config
@@ -933,6 +934,19 @@ func (m *MockConfigStore) UpdateConfig(ctx context.Context, config *tables.Table
 	return nil
 }
 
+func (m *MockConfigStore) GetComplexityAnalyzerConfig(ctx context.Context) (*configstore.ComplexityAnalyzerConfig, error) {
+	return m.complexityConfig, nil
+}
+
+func (m *MockConfigStore) UpdateComplexityAnalyzerConfig(ctx context.Context, config *configstore.ComplexityAnalyzerConfig, tx ...*gorm.DB) error {
+	m.complexityConfig = config
+	if m.governanceConfig == nil {
+		m.governanceConfig = &configstore.GovernanceConfig{}
+	}
+	m.governanceConfig.ComplexityAnalyzerConfig = config
+	return nil
+}
+
 // Plugins
 func (m *MockConfigStore) GetPlugins(ctx context.Context) ([]*tables.TablePlugin, error) {
 	return m.plugins, nil
@@ -1375,6 +1389,42 @@ func (m *MockConfigStore) UpdateRoutingRule(ctx context.Context, rule *tables.Ta
 
 func (m *MockConfigStore) DeleteRoutingRule(ctx context.Context, id string, tx ...*gorm.DB) error {
 	return nil
+}
+
+func TestMergeGovernanceConfig_SyncsComplexityAnalyzerConfig(t *testing.T) {
+	initTestLogger()
+
+	store := NewMockConfigStore()
+	dbGovernance := &configstore.GovernanceConfig{}
+	config := &Config{
+		ConfigStore:      store,
+		GovernanceConfig: dbGovernance,
+	}
+	fileConfig := &configstore.ComplexityAnalyzerConfig{
+		TierBoundaries: configstore.ComplexityTierBoundaries{
+			SimpleMedium:     0.11,
+			MediumComplex:    0.33,
+			ComplexReasoning: 0.77,
+		},
+		Keywords: configstore.ComplexityEditableKeywordConfig{
+			CodeKeywords:      []string{" Function ", "api", "API"},
+			ReasoningKeywords: []string{"tradeoffs"},
+			TechnicalKeywords: []string{"latency"},
+			SimpleKeywords:    []string{"hello"},
+		},
+	}
+	configData := &ConfigData{
+		Governance: &configstore.GovernanceConfig{
+			ComplexityAnalyzerConfig: fileConfig,
+		},
+	}
+
+	mergeGovernanceConfig(context.Background(), config, configData, dbGovernance)
+
+	require.NotNil(t, store.complexityConfig)
+	require.Equal(t, 0.77, store.complexityConfig.TierBoundaries.ComplexReasoning)
+	require.Equal(t, []string{"api", "function"}, store.complexityConfig.Keywords.CodeKeywords)
+	require.Same(t, store.complexityConfig, config.GovernanceConfig.ComplexityAnalyzerConfig)
 }
 
 // Prompt Repository - Folders
@@ -15628,6 +15678,9 @@ func getSchemaTypeMappings() []schemaTypeMapping {
 		{"governance.virtual_keys.provider_configs", reflect.TypeOf(tables.TableVirtualKeyProviderConfig{}), true},
 		{"governance.virtual_keys.mcp_configs", reflect.TypeOf(tables.TableVirtualKeyMCPConfig{}), true},
 		{"governance.auth_config", reflect.TypeOf(configstore.AuthConfig{}), false},
+		{"governance.complexity_analyzer_config", reflect.TypeOf(configstore.ComplexityAnalyzerConfig{}), false},
+		{"governance.complexity_analyzer_config.tier_boundaries", reflect.TypeOf(configstore.ComplexityTierBoundaries{}), false},
+		{"governance.complexity_analyzer_config.keywords", reflect.TypeOf(configstore.ComplexityEditableKeywordConfig{}), false},
 
 		// Plugins
 		{"plugins", reflect.TypeOf(schemas.PluginConfig{}), true},

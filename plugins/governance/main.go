@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bytedance/sonic"
@@ -90,7 +91,7 @@ type GovernancePlugin struct {
 	isEnterprise          bool
 	disableAutoToolInject *bool
 
-	complexityAnalyzer *complexity.ComplexityAnalyzer
+	complexityAnalyzer atomic.Pointer[complexity.ComplexityAnalyzer]
 }
 
 // Init initializes and returns a governance plugin instance.
@@ -233,7 +234,7 @@ func Init(
 		disableAutoToolInject: disableAutoToolInject,
 		inMemoryStore:         inMemoryStore,
 	}
-	plugin.complexityAnalyzer = complexity.NewComplexityAnalyzer()
+	plugin.storeComplexityAnalyzerConfig(resolveAnalyzerConfigFromStoreOrArg(ctx, logger, configStore, governanceConfig))
 	return plugin, nil
 }
 
@@ -328,13 +329,59 @@ func InitFromStore(
 		isEnterprise:          config != nil && config.IsEnterprise,
 		disableAutoToolInject: disableAutoToolInject,
 	}
-	plugin.complexityAnalyzer = complexity.NewComplexityAnalyzer()
+	plugin.storeComplexityAnalyzerConfig(resolveAnalyzerConfigFromStoreOrArg(ctx, logger, configStore, nil))
 	return plugin, nil
 }
 
 // GetName returns the name of the plugin
 func (p *GovernancePlugin) GetName() string {
 	return PluginName
+}
+
+// ReloadComplexityAnalyzerConfig swaps the analyzer used by complexity_tier routing.
+func (p *GovernancePlugin) ReloadComplexityAnalyzerConfig(config *complexity.AnalyzerConfig) {
+	p.storeComplexityAnalyzerConfig(config)
+}
+
+func (p *GovernancePlugin) storeComplexityAnalyzerConfig(config *complexity.AnalyzerConfig) {
+	resolved, err := complexity.ValidateAndNormalize(config)
+	if err != nil {
+		if p.logger != nil {
+			p.logger.Warn("invalid complexity analyzer config, using defaults: %v", err)
+		}
+		defaults := complexity.DefaultAnalyzerConfig()
+		resolved = &defaults
+	}
+	p.complexityAnalyzer.Store(complexity.NewComplexityAnalyzerWithConfig(resolved))
+}
+
+func resolveAnalyzerConfigFromStoreOrArg(
+	ctx context.Context,
+	logger schemas.Logger,
+	configStore configstore.ConfigStore,
+	governanceConfig *configstore.GovernanceConfig,
+) *complexity.AnalyzerConfig {
+	if governanceConfig != nil && governanceConfig.ComplexityAnalyzerConfig != nil {
+		cfg, err := complexity.ValidateAndNormalize(governanceConfig.ComplexityAnalyzerConfig)
+		if err != nil {
+			if logger != nil {
+				logger.Warn("invalid complexity analyzer config from governance config: %v", err)
+			}
+		} else if cfg != nil {
+			return cfg
+		}
+	}
+	if configStore != nil {
+		cfg, err := configStore.GetComplexityAnalyzerConfig(ctx)
+		if err != nil {
+			if logger != nil {
+				logger.Warn("failed to load complexity analyzer config from store: %v", err)
+			}
+		} else if cfg != nil {
+			return cfg
+		}
+	}
+	return nil
 }
 
 // UpdateEnforceAuthOnInference updates the enforce auth on inference config
@@ -1002,7 +1049,7 @@ func (p *GovernancePlugin) applyRoutingRules(ctx *schemas.BifrostContext, req *s
 
 	// Set up lazy complexity computation; only runs if a rule actually references "complexity_tier".
 	var computeComplexity func() *complexity.ComplexityResult
-	if analyzer := p.complexityAnalyzer; analyzer != nil {
+	if analyzer := p.complexityAnalyzer.Load(); analyzer != nil {
 		computeComplexity = func() *complexity.ComplexityResult {
 			if input, ok := buildComplexityInput(ctx, body); ok {
 				result := analyzer.Analyze(input)

@@ -3553,7 +3553,9 @@ func (provider *AzureProvider) Passthrough(
 		ExtraFields: schemas.BifrostResponseExtraFields{
 			Latency:                 latency.Milliseconds(),
 			ProviderResponseHeaders: headers,
+			PassthroughPath:         req.Path,
 		},
+		PassthroughUsage: extractAzurePassthroughUsage(req.Path, req.Body, body, req.Model),
 	}
 
 	return bifrostResponse, nil
@@ -3633,6 +3635,7 @@ func (provider *AzureProvider) PassthroughStream(
 
 	extraFields := schemas.BifrostResponseExtraFields{
 		ProviderResponseHeaders: headers,
+		PassthroughPath:         req.Path,
 	}
 	statusCode := resp.StatusCode()
 
@@ -3651,12 +3654,14 @@ func (provider *AzureProvider) PassthroughStream(
 		defer stopIdleTimeout()
 		defer stopCancellation()
 
+		var accBody []byte
 		buf := make([]byte, 4096)
 		for {
 			n, readErr := bodyStream.Read(buf)
 			if n > 0 {
 				chunk := make([]byte, n)
 				copy(chunk, buf[:n])
+				accBody = append(accBody, chunk...)
 				providerUtils.ProcessAndSendResponse(ctx, postHookRunner, &schemas.BifrostResponse{
 					PassthroughResponse: &schemas.BifrostPassthroughResponse{
 						StatusCode:  statusCode,
@@ -3669,11 +3674,13 @@ func (provider *AzureProvider) PassthroughStream(
 			if readErr == io.EOF {
 				ctx.SetValue(schemas.BifrostContextKeyStreamEndIndicator, true)
 				extraFields.Latency = time.Since(startTime).Milliseconds()
+				extraFields.RawRequest = req.Body
 				providerUtils.ProcessAndSendResponse(ctx, postHookRunner, &schemas.BifrostResponse{
 					PassthroughResponse: &schemas.BifrostPassthroughResponse{
-						StatusCode:  statusCode,
-						Headers:     headers,
-						ExtraFields: extraFields,
+						StatusCode:       statusCode,
+						Headers:          headers,
+						ExtraFields:      extraFields,
+						PassthroughUsage: extractAzurePassthroughUsage(req.Path, req.Body, accBody, req.Model),
 					},
 				}, ch, postHookSpanFinalizer)
 				return
@@ -3728,4 +3735,15 @@ func (provider *AzureProvider) buildPassthroughURL(key schemas.Key, path, rawQue
 		fullURL += "?" + rawQuery
 	}
 	return fullURL
+}
+
+// extractAzurePassthroughUsage dispatches usage extraction by the upstream API the
+// passthrough request targets. Azure serves both OpenAI and Azure-hosted Anthropic models,
+// so Anthropic routes (e.g. /messages) must use the Anthropic extractor — otherwise their
+// usage is dropped and budgets/logging stay wrong.
+func extractAzurePassthroughUsage(path string, reqBody, accBody []byte, model string) *schemas.BifrostPassthroughUsage {
+	if schemas.IsAnthropicModel(model) {
+		return anthropic.ExtractAnthropicPassthroughUsage(path, reqBody, accBody)
+	}
+	return openai.ExtractOpenAIPassthroughUsage(path, reqBody, accBody)
 }

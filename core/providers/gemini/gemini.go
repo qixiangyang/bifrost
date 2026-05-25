@@ -4142,7 +4142,9 @@ func (provider *GeminiProvider) Passthrough(
 		ExtraFields: schemas.BifrostResponseExtraFields{
 			Latency:                 latency.Milliseconds(),
 			ProviderResponseHeaders: headers,
+			PassthroughPath:         req.Path,
 		},
+		PassthroughUsage: ExtractGeminiPassthroughUsage(req.Path, req.Body, body),
 	}
 
 	return bifrostResponse, nil
@@ -4230,6 +4232,7 @@ func (provider *GeminiProvider) PassthroughStream(
 
 	extraFields := schemas.BifrostResponseExtraFields{
 		ProviderResponseHeaders: headers,
+		PassthroughPath:         req.Path,
 	}
 	statusCode := resp.StatusCode()
 
@@ -4248,6 +4251,7 @@ func (provider *GeminiProvider) PassthroughStream(
 		defer stopIdleTimeout()
 		defer stopCancellation()
 
+		var accBody []byte
 		terminalDetector := &providerUtils.StreamTerminalDetector{}
 		buf := make([]byte, 4096)
 		for {
@@ -4255,6 +4259,7 @@ func (provider *GeminiProvider) PassthroughStream(
 			if n > 0 {
 				chunk := make([]byte, n)
 				copy(chunk, buf[:n])
+				accBody = append(accBody, chunk...)
 				providerUtils.ProcessAndSendResponse(ctx, postHookRunner, &schemas.BifrostResponse{
 					PassthroughResponse: &schemas.BifrostPassthroughResponse{
 						StatusCode:  statusCode,
@@ -4267,11 +4272,13 @@ func (provider *GeminiProvider) PassthroughStream(
 				if terminalDetector.ObserveChunk(chunk) {
 					ctx.SetValue(schemas.BifrostContextKeyStreamEndIndicator, true)
 					extraFields.Latency = time.Since(startTime).Milliseconds()
+					extraFields.RawRequest = req.Body
 					providerUtils.ProcessAndSendResponse(ctx, postHookRunner, &schemas.BifrostResponse{
 						PassthroughResponse: &schemas.BifrostPassthroughResponse{
-							StatusCode:  statusCode,
-							Headers:     headers,
-							ExtraFields: extraFields,
+							StatusCode:       statusCode,
+							Headers:          headers,
+							ExtraFields:      extraFields,
+							PassthroughUsage: ExtractGeminiPassthroughUsage(req.Path, req.Body, accBody),
 						},
 					}, ch, postHookSpanFinalizer)
 					return
@@ -4280,11 +4287,13 @@ func (provider *GeminiProvider) PassthroughStream(
 			if readErr == io.EOF {
 				ctx.SetValue(schemas.BifrostContextKeyStreamEndIndicator, true)
 				extraFields.Latency = time.Since(startTime).Milliseconds()
+				extraFields.RawRequest = req.Body
 				providerUtils.ProcessAndSendResponse(ctx, postHookRunner, &schemas.BifrostResponse{
 					PassthroughResponse: &schemas.BifrostPassthroughResponse{
-						StatusCode:  statusCode,
-						Headers:     headers,
-						ExtraFields: extraFields,
+						StatusCode:       statusCode,
+						Headers:          headers,
+						ExtraFields:      extraFields,
+						PassthroughUsage: ExtractGeminiPassthroughUsage(req.Path, req.Body, accBody),
 					},
 				}, ch, postHookSpanFinalizer)
 				return

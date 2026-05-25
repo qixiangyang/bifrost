@@ -6981,7 +6981,9 @@ func (provider *OpenAIProvider) Passthrough(
 		ExtraFields: schemas.BifrostResponseExtraFields{
 			Latency:                 latency.Milliseconds(),
 			ProviderResponseHeaders: headers,
+			PassthroughPath:         req.Path,
 		},
+		PassthroughUsage: ExtractOpenAIPassthroughUsage(req.Path, req.Body, body),
 	}
 
 	return bifrostResponse, nil
@@ -7071,6 +7073,7 @@ func (provider *OpenAIProvider) PassthroughStream(
 
 	extraFields := schemas.BifrostResponseExtraFields{
 		ProviderResponseHeaders: headers,
+		PassthroughPath:         req.Path,
 	}
 	statusCode := resp.StatusCode()
 
@@ -7089,12 +7092,14 @@ func (provider *OpenAIProvider) PassthroughStream(
 		defer stopIdleTimeout()
 		defer stopCancellation()
 
+		var accBody []byte
 		buf := make([]byte, 4096)
 		for {
 			n, readErr := bodyStream.Read(buf)
 			if n > 0 {
 				chunk := make([]byte, n)
 				copy(chunk, buf[:n])
+				accBody = append(accBody, chunk...)
 				providerUtils.ProcessAndSendResponse(ctx, postHookRunner, &schemas.BifrostResponse{
 					PassthroughResponse: &schemas.BifrostPassthroughResponse{
 						StatusCode:  statusCode,
@@ -7107,11 +7112,13 @@ func (provider *OpenAIProvider) PassthroughStream(
 			if readErr == io.EOF {
 				ctx.SetValue(schemas.BifrostContextKeyStreamEndIndicator, true)
 				extraFields.Latency = time.Since(startTime).Milliseconds()
+				extraFields.RawRequest = req.Body
 				providerUtils.ProcessAndSendResponse(ctx, postHookRunner, &schemas.BifrostResponse{
 					PassthroughResponse: &schemas.BifrostPassthroughResponse{
-						StatusCode:  statusCode,
-						Headers:     headers,
-						ExtraFields: extraFields,
+						StatusCode:       statusCode,
+						Headers:          headers,
+						ExtraFields:      extraFields,
+						PassthroughUsage: ExtractOpenAIPassthroughUsage(req.Path, req.Body, accBody),
 					},
 				}, ch, postHookSpanFinalizer)
 				return

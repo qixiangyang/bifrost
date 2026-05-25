@@ -299,7 +299,7 @@ func (mc *ModelCatalog) calculateBaseCost(result *schemas.BifrostResponse, scope
 	resolvedModelUsed := extraFields.ResolvedModelUsed
 	requestType := extraFields.RequestType
 
-	// Extract usage data from the response
+	// Extract usage data from the response (passthrough and native paths unified)
 	input := extractCostInput(result)
 
 	// If provider already computed cost, use it
@@ -312,8 +312,13 @@ func (mc *ModelCatalog) calculateBaseCost(result *schemas.BifrostResponse, scope
 		return 0
 	}
 
-	// Normalize stream request types to their base type for pricing lookup
-	requestType = normalizeStreamRequestType(requestType)
+	if result.PassthroughResponse != nil {
+		// Infer request type from usage fields + path; passthrough bypasses stream normalization.
+		requestType = inferPassthroughRequestType(extraFields.Provider, extraFields.PassthroughPath, result.PassthroughResponse.PassthroughUsage)
+	} else {
+		// Normalize stream request types to their base type for pricing lookup
+		requestType = normalizeStreamRequestType(requestType)
+	}
 
 	// When a pricing model override is set, use it in place of the actual requested/resolved
 	// model names during pricing lookup (e.g. container creates always look up "container").
@@ -362,6 +367,9 @@ func extractCostInput(result *schemas.BifrostResponse) costInput {
 	var input costInput
 
 	switch {
+	case result.PassthroughResponse != nil && result.PassthroughResponse.PassthroughUsage != nil:
+		return passthroughUsageToCostInput(result.PassthroughResponse.PassthroughUsage)
+
 	case result.TextCompletionResponse != nil && result.TextCompletionResponse.Usage != nil:
 		input.usage = result.TextCompletionResponse.Usage
 
@@ -1334,4 +1342,123 @@ func (mc *ModelCatalog) UpsertModelPricingAttributes(ctx context.Context, model 
 		return rows, fmt.Errorf("failed to reload pricing cache after attribute write: %w", err)
 	}
 	return rows, nil
+}
+
+// ---------------------------------------------------------------------------
+// Passthrough pricing helpers
+// ---------------------------------------------------------------------------
+
+// detectPassthroughRequestType maps a provider + stripped path to a RequestType.
+func detectPassthroughRequestType(provider schemas.ModelProvider, path string) schemas.RequestType {
+	if idx := strings.IndexByte(path, '?'); idx >= 0 {
+		path = path[:idx]
+	}
+	path = strings.TrimRight(path, "/")
+	switch provider {
+	case schemas.OpenAI, schemas.Azure:
+		switch {
+		case strings.HasSuffix(path, "/chat/completions"):
+			return schemas.ChatCompletionRequest
+		case strings.HasSuffix(path, "/completions"):
+			return schemas.TextCompletionRequest
+		case strings.HasSuffix(path, "/embeddings"):
+			return schemas.EmbeddingRequest
+		case strings.HasSuffix(path, "/responses"):
+			return schemas.ResponsesRequest
+		case strings.HasSuffix(path, "/images/generations"):
+			return schemas.ImageGenerationRequest
+		case strings.HasSuffix(path, "/images/edits"):
+			return schemas.ImageEditRequest
+		case strings.HasSuffix(path, "/audio/speech"):
+			return schemas.SpeechRequest
+		case strings.HasSuffix(path, "/audio/transcriptions"),
+			strings.HasSuffix(path, "/audio/translations"):
+			return schemas.TranscriptionRequest
+		default:
+			return schemas.ChatCompletionRequest
+		}
+	case schemas.Gemini, schemas.Vertex:
+		colonIdx := strings.LastIndexByte(path, ':')
+		if colonIdx < 0 {
+			return schemas.ChatCompletionRequest
+		}
+		switch path[colonIdx+1:] {
+		case "generateContent", "streamGenerateContent":
+			return schemas.ResponsesRequest
+		case "embedContent", "batchEmbedContents":
+			return schemas.EmbeddingRequest
+		case "generateImages":
+			return schemas.ImageGenerationRequest
+		case "predict":
+			return schemas.EmbeddingRequest
+		default:
+			return schemas.ChatCompletionRequest
+		}
+	case schemas.Anthropic:
+		switch {
+		case strings.HasSuffix(path, "/messages"):
+			return schemas.ResponsesRequest
+		case strings.HasSuffix(path, "/complete"):
+			return schemas.TextCompletionRequest
+		default:
+			return schemas.ResponsesRequest
+		}
+	default:
+		return schemas.ChatCompletionRequest
+	}
+}
+
+// inferPassthroughRequestType determines the request type from usage fields (primary)
+// and falls back to path detection for text/embedding/responses where LLMUsage is ambiguous.
+func inferPassthroughRequestType(provider schemas.ModelProvider, path string, su *schemas.BifrostPassthroughUsage) schemas.RequestType {
+	if su != nil {
+		if su.ContainerIdentifier != "" {
+			return schemas.ContainerCreateRequest
+		}
+		if su.ImageUsage != nil {
+			return schemas.ImageGenerationRequest
+		}
+		if su.AudioInputChars > 0 {
+			return schemas.SpeechRequest
+		}
+		if su.AudioTokenDetails != nil || su.AudioSeconds != nil {
+			return schemas.TranscriptionRequest
+		}
+		if su.VideoSeconds != nil {
+			return schemas.VideoGenerationRequest
+		}
+	}
+	return detectPassthroughRequestType(provider, path)
+}
+
+// passthroughUsageToCostInput converts BifrostPassthroughUsage into costInput.
+func passthroughUsageToCostInput(su *schemas.BifrostPassthroughUsage) costInput {
+	var input costInput
+	if su.LLMUsage != nil {
+		input.usage = su.LLMUsage
+	}
+	if su.ServiceTier != nil {
+		input.tier = tierFromString(su.ServiceTier)
+	}
+	if su.ImageUsage != nil {
+		input.imageUsage = su.ImageUsage
+		input.imageSize = su.ImageSize
+		input.imageQuality = su.ImageQuality
+	}
+	if su.AudioInputChars > 0 {
+		input.audioTextInputChars = su.AudioInputChars
+	}
+	if su.AudioSeconds != nil {
+		input.audioSeconds = su.AudioSeconds
+	}
+	if su.AudioTokenDetails != nil {
+		input.audioTokenDetails = su.AudioTokenDetails
+	}
+	if su.VideoSeconds != nil {
+		input.videoSeconds = su.VideoSeconds
+	}
+	if su.ContainerIdentifier != "" {
+		input.containerIdentifierString = su.ContainerIdentifier
+	}
+	return input
 }

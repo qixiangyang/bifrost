@@ -3040,7 +3040,10 @@ func (provider *VertexProvider) Passthrough(
 		ExtraFields: schemas.BifrostResponseExtraFields{
 			Latency:                 latency.Milliseconds(),
 			ProviderResponseHeaders: headers,
+			PassthroughPath:         req.Path,
+			RawRequest:              req.Body,
 		},
+		PassthroughUsage: gemini.ExtractGeminiPassthroughUsage(req.Path, req.Body, body),
 	}
 
 	return bifrostResponse, nil
@@ -3190,7 +3193,10 @@ func (provider *VertexProvider) PassthroughStream(
 	// Cancellation must close the raw stream to unblock reads.
 	stopCancellation := providerUtils.SetupStreamCancellation(ctx, rawBodyStream, provider.logger)
 
-	extraFields := schemas.BifrostResponseExtraFields{}
+	extraFields := schemas.BifrostResponseExtraFields{
+		ProviderResponseHeaders: headers,
+		PassthroughPath:         req.Path,
+	}
 	statusCode := resp.StatusCode()
 
 	ch := make(chan *schemas.BifrostStreamChunk, schemas.DefaultStreamBufferSize)
@@ -3210,12 +3216,14 @@ func (provider *VertexProvider) PassthroughStream(
 		streamStart := time.Now()
 
 		terminalDetector := &providerUtils.StreamTerminalDetector{}
+		var accBody []byte
 		buf := make([]byte, 4096)
 		for {
 			n, readErr := bodyStream.Read(buf)
 			if n > 0 {
 				chunk := make([]byte, n)
 				copy(chunk, buf[:n])
+				accBody = append(accBody, chunk...)
 				providerUtils.ProcessAndSendResponse(ctx, postHookRunner, &schemas.BifrostResponse{
 					PassthroughResponse: &schemas.BifrostPassthroughResponse{
 						StatusCode:  statusCode,
@@ -3231,11 +3239,13 @@ func (provider *VertexProvider) PassthroughStream(
 				if terminalDetector.ObserveChunk(chunk) {
 					ctx.SetValue(schemas.BifrostContextKeyStreamEndIndicator, true)
 					extraFields.Latency = time.Since(streamStart).Milliseconds()
+					extraFields.RawRequest = req.Body
 					providerUtils.ProcessAndSendResponse(ctx, postHookRunner, &schemas.BifrostResponse{
 						PassthroughResponse: &schemas.BifrostPassthroughResponse{
-							StatusCode:  statusCode,
-							Headers:     headers,
-							ExtraFields: extraFields,
+							StatusCode:       statusCode,
+							Headers:          headers,
+							ExtraFields:      extraFields,
+							PassthroughUsage: gemini.ExtractGeminiPassthroughUsage(req.Path, req.Body, accBody),
 						},
 					}, ch, postHookSpanFinalizer)
 					return
@@ -3244,11 +3254,13 @@ func (provider *VertexProvider) PassthroughStream(
 			if readErr == io.EOF {
 				ctx.SetValue(schemas.BifrostContextKeyStreamEndIndicator, true)
 				extraFields.Latency = time.Since(streamStart).Milliseconds()
+				extraFields.RawRequest = req.Body
 				providerUtils.ProcessAndSendResponse(ctx, postHookRunner, &schemas.BifrostResponse{
 					PassthroughResponse: &schemas.BifrostPassthroughResponse{
-						StatusCode:  statusCode,
-						Headers:     headers,
-						ExtraFields: extraFields,
+						StatusCode:       statusCode,
+						Headers:          headers,
+						ExtraFields:      extraFields,
+						PassthroughUsage: gemini.ExtractGeminiPassthroughUsage(req.Path, req.Body, accBody),
 					},
 				}, ch, postHookSpanFinalizer)
 				return

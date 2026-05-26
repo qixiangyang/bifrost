@@ -8966,10 +8966,8 @@ func migrationAddAdditionalAttributesToPricing(ctx context.Context, db *gorm.DB)
 	return nil
 }
 
-// migrationAddVirtualKeyExpiresAtColumn adds the nullable expires_at column to governance_virtual_keys.
-// A NULL value means the key never expires. When set to a past timestamp the key is rejected at
-// request time without modifying the record. No index is added because queries never filter on
-// this column; enforcement is a single in-memory timestamp comparison.
+// migrationAddVirtualKeyExpiresAtColumn adds nullable expires_at to governance_virtual_keys.
+// No index: expiry is checked in-memory from the already-loaded VK, never queried by column.
 func migrationAddVirtualKeyExpiresAtColumn(ctx context.Context, db *gorm.DB) error {
 	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
 		ID: "add_virtual_key_expires_at_column",

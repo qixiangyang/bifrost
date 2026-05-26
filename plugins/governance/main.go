@@ -411,6 +411,7 @@ func (p *GovernancePlugin) HTTPTransportPreHook(ctx *schemas.BifrostContext, req
 	if virtualKeyValue != nil {
 		virtualKey, ok = p.store.GetVirtualKey(ctx, *virtualKeyValue)
 		if !ok || virtualKey == nil || !virtualKey.IsActiveValue() || virtualKey.IsExpiredAt(time.Now().UTC()) {
+			// Skip VK-specific modifications only; PreLLMHook enforces the access block.
 			return nil, nil
 		}
 	}
@@ -509,6 +510,7 @@ func (p *GovernancePlugin) governLargePayload(ctx *schemas.BifrostContext, req *
 	if virtualKeyValue != nil {
 		vk, ok := p.store.GetVirtualKey(ctx, *virtualKeyValue)
 		if !ok || vk == nil || !vk.IsActiveValue() || vk.IsExpiredAt(time.Now().UTC()) {
+			// Skip VK-specific modifications only; PreLLMHook enforces the access block.
 			return nil, nil
 		}
 		virtualKey = vk
@@ -618,6 +620,7 @@ func (p *GovernancePlugin) governRealtimeQueryParam(ctx *schemas.BifrostContext,
 	if virtualKeyValue != nil {
 		vk, ok := p.store.GetVirtualKey(ctx, *virtualKeyValue)
 		if !ok || vk == nil || !vk.IsActiveValue() || vk.IsExpiredAt(time.Now().UTC()) {
+			// Skip VK-specific modifications only; PreLLMHook enforces the access block.
 			return nil, nil
 		}
 		virtualKey = vk

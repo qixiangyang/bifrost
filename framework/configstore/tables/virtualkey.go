@@ -24,14 +24,14 @@ func (TableVirtualKeyProviderConfigKey) TableName() string {
 
 // TableVirtualKeyProviderConfig represents a provider configuration for a virtual key
 type TableVirtualKeyProviderConfig struct {
-	ID                uint                `gorm:"primaryKey;autoIncrement" json:"id"`
-	VirtualKeyID      string              `gorm:"type:varchar(255);not null" json:"virtual_key_id"`
-	Provider          string              `gorm:"type:varchar(50);not null" json:"provider"`
-	Weight            *float64            `json:"weight"`
-	AllowedModels     schemas.WhiteList   `gorm:"type:text;serializer:json" json:"allowed_models"`         // ["*"] allows all models; empty denies all (deny-by-default)
-	BlacklistedModels schemas.BlackList   `gorm:"type:text;serializer:json" json:"blacklisted_models"`     // ["*"] blocks all models; empty blocks none
-	AllowAllKeys      bool                `gorm:"default:false" json:"allow_all_keys"`                     // True means all keys allowed; false with empty Keys means no keys allowed (deny-by-default)
-	RateLimitID   *string           `gorm:"type:varchar(255);index" json:"rate_limit_id,omitempty"`
+	ID                uint              `gorm:"primaryKey;autoIncrement" json:"id"`
+	VirtualKeyID      string            `gorm:"type:varchar(255);not null" json:"virtual_key_id"`
+	Provider          string            `gorm:"type:varchar(50);not null" json:"provider"`
+	Weight            *float64          `json:"weight"`
+	AllowedModels     schemas.WhiteList `gorm:"type:text;serializer:json" json:"allowed_models"`     // ["*"] allows all models; empty denies all (deny-by-default)
+	BlacklistedModels schemas.BlackList `gorm:"type:text;serializer:json" json:"blacklisted_models"` // ["*"] blocks all models; empty blocks none
+	AllowAllKeys      bool              `gorm:"default:false" json:"allow_all_keys"`                 // True means all keys allowed; false with empty Keys means no keys allowed (deny-by-default)
+	RateLimitID       *string           `gorm:"type:varchar(255);index" json:"rate_limit_id,omitempty"`
 
 	// Relationships
 	RateLimit *TableRateLimit `gorm:"foreignKey:RateLimitID;onDelete:CASCADE" json:"rate_limit,omitempty"`
@@ -211,6 +211,7 @@ type TableVirtualKey struct {
 	Description     string                          `gorm:"type:text" json:"description,omitempty"`
 	Value           string                          `gorm:"uniqueIndex:idx_virtual_key_value;type:text;not null" json:"value"`           // The virtual key value
 	IsActive        *bool                           `gorm:"default:true" json:"is_active,omitempty"`                                     // Nil means true (DB default); false means inactive
+	ExpiresAt       *time.Time                      `gorm:"type:timestamp;null" json:"expires_at,omitempty"`                             // Optional expiry; nil means never expires
 	ProviderConfigs []TableVirtualKeyProviderConfig `gorm:"foreignKey:VirtualKeyID;constraint:OnDelete:CASCADE" json:"provider_configs"` // Empty means no providers allowed (deny-by-default)
 	MCPConfigs      []TableVirtualKeyMCPConfig      `gorm:"foreignKey:VirtualKeyID;constraint:OnDelete:CASCADE" json:"mcp_configs"`
 
@@ -252,6 +253,18 @@ func (vk *TableVirtualKey) IsActiveValue() bool {
 		return true
 	}
 	return *vk.IsActive
+}
+
+// IsExpiredAt reports whether the virtual key has passed its expiry.
+// Returns false when ExpiresAt is nil (never expires).
+// The boundary condition now == expires_at is treated as expired.
+// The caller must supply the current time (no raw time.Now() inside the helper)
+// so tests can use fixed timestamps.
+func (vk *TableVirtualKey) IsExpiredAt(now time.Time) bool {
+	if vk == nil || vk.ExpiresAt == nil {
+		return false
+	}
+	return !now.UTC().Before(vk.ExpiresAt.UTC())
 }
 
 // BeforeSave is a GORM hook that enforces mutual exclusion (team vs customer), computes

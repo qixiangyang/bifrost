@@ -98,6 +98,7 @@ type CreateVirtualKeyRequest struct {
 	RateLimit       *CreateRateLimitRequest `json:"rate_limit,omitempty"`
 	IsActive        *bool                   `json:"is_active,omitempty"`
 	CalendarAligned bool                    `json:"calendar_aligned,omitempty"` // When true, all budgets reset at clean calendar boundaries
+	ExpiresAt       *time.Time              `json:"expires_at,omitempty"`       // Optional expiry; nil means never expires
 }
 
 // UpdateVirtualKeyRequest represents the request body for updating a virtual key
@@ -124,8 +125,11 @@ type UpdateVirtualKeyRequest struct {
 	Budgets          []CreateBudgetRequest        `json:"budgets,omitempty"` // Multi-budget: replaces all VK-level budgets
 	RateLimit        *UpdateRateLimitRequest      `json:"rate_limit,omitempty"`
 	IsActive         *bool                        `json:"is_active,omitempty"`
-	CalendarAligned  *bool                        `json:"calendar_aligned,omitempty"` // When true, all budgets reset at clean calendar boundaries
+	CalendarAligned  *bool                        `json:"calendar_aligned,omitempty"`    // When true, all budgets reset at clean calendar boundaries
 	ResetBudgetUsage *bool                        `json:"reset_budget_usage,omitempty"`
+	ExpiresAt        *time.Time                   `json:"expires_at,omitempty"`          // Set a new expiry; nil means "leave unchanged"
+	ClearExpiresAt   bool                         `json:"clear_expires_at,omitempty"`    // true to remove an existing expiry (also clears delete_after_expiry)
+	DeleteAfterExpiry *bool                       `json:"delete_after_expiry,omitempty"` // nil means "leave unchanged"
 }
 
 var errVirtualKeyDualAssociation = errors.New("VirtualKey cannot be attached to both Team and Customer")
@@ -618,6 +622,11 @@ func (h *GovernanceHandler) createVirtualKey(ctx *fasthttp.RequestCtx) {
 			seenDurations[b.ResetDuration] = true
 		}
 	}
+	// Validate expires_at: must be in the future if provided
+	if req.ExpiresAt != nil && !req.ExpiresAt.After(time.Now().UTC()) {
+		SendError(ctx, 400, "expires_at must be a future timestamp")
+		return
+	}
 	// Set defaults: nil means "use DB default (true)"
 	isActive := req.IsActive
 	if isActive == nil {
@@ -644,6 +653,7 @@ func (h *GovernanceHandler) createVirtualKey(ctx *fasthttp.RequestCtx) {
 			CustomerID:      req.CustomerID,
 			IsActive:        isActive,
 			CalendarAligned: req.CalendarAligned,
+			ExpiresAt:       req.ExpiresAt,
 		}
 		if req.RateLimit != nil {
 			rateLimit := configstoreTables.TableRateLimit{
@@ -878,6 +888,16 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, 400, "VirtualKey cannot be attached to both Team and Customer")
 		return
 	}
+	// Validate mutually exclusive ExpiresAt and ClearExpiresAt
+	if req.ExpiresAt != nil && req.ClearExpiresAt {
+		SendError(ctx, 400, "cannot set both expires_at and clear_expires_at")
+		return
+	}
+	// Validate expires_at: must be in the future if provided
+	if req.ExpiresAt != nil && !req.ExpiresAt.After(time.Now().UTC()) {
+		SendError(ctx, 400, "expires_at must be a future timestamp")
+		return
+	}
 	vk, err := h.configStore.GetVirtualKey(ctx, vkID)
 	if err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
@@ -933,6 +953,11 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 		}
 		if req.IsActive != nil {
 			vk.IsActive = req.IsActive
+		}
+		if req.ClearExpiresAt {
+			vk.ExpiresAt = nil
+		} else if req.ExpiresAt != nil {
+			vk.ExpiresAt = req.ExpiresAt
 		}
 		if req.CalendarAligned != nil {
 			vk.CalendarAligned = *req.CalendarAligned

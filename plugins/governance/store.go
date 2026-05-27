@@ -99,6 +99,22 @@ type BudgetAndRateLimitStatus struct {
 type GovernanceStore interface {
 	GetGovernanceData(ctx context.Context) *GovernanceData
 	GetVirtualKey(ctx context.Context, vkValue string) (*configstoreTables.TableVirtualKey, bool)
+	// EachBudget calls fn for every budget loaded in memory. Used by the
+	// consumer to evaluate thresholds after usage updates.
+	// EachBudget calls fn for every budget loaded in memory, passing the
+	// owner scope type and ID derived from the budget's FK columns.
+	// ownerScopeType is one of "virtual_key", "team", "customer", "provider", or "global".
+	EachBudget(fn func(budgetID string, currentUsage, maxLimit float64, ownerScopeType, ownerScopeID string))
+	// EachRateLimit calls fn for every rate limit loaded in memory, passing the
+	// owner scope type and ID derived from the rate limit's FK columns.
+	// ownerScopeType is one of "virtual_key", "team", "customer", or "global".
+	EachRateLimit(fn func(rateLimitID string, tokenCurrentUsage, tokenMaxLimit int64, ownerScopeType, ownerScopeID string))
+	// EachRequestLimit calls fn for every rate limit that has a request-limit configured,
+	// passing the owner scope type and ID derived from the rate limit's FK columns.
+	// This is separate from EachRateLimit because request limits and token limits are
+	// independent dimensions stored in the same row. A rate limit may have only request
+	// limits, only token limits, or both.
+	EachRequestLimit(fn func(rateLimitID string, requestCurrentUsage, requestMaxLimit int64, ownerScopeType, ownerScopeID string))
 	// Budget crud.
 	// UpsertBudgetConfig preserves in-memory CurrentUsage/LastReset on replacement —
 	// use it for every config publish (fresh load or admin edit) so a concurrent
@@ -1710,6 +1726,73 @@ func (gs *LocalGovernanceStore) DumpBudgets(ctx context.Context, baselines map[s
 		}
 	}
 	return nil
+}
+
+// ownerScopeFromBudget derives the alert-rule scope type and ID from a budget's FK columns.
+func ownerScopeFromBudget(b *configstoreTables.TableBudget) (scopeType, scopeID string) {
+	switch {
+	case b.VirtualKeyID != nil:
+		return "virtual_key", *b.VirtualKeyID
+	case b.TeamID != nil:
+		return "team", *b.TeamID
+	case b.CustomerID != nil:
+		return "customer", *b.CustomerID
+	case b.ProviderConfigID != nil:
+		return "provider", fmt.Sprintf("%d", *b.ProviderConfigID)
+	default:
+		return "global", ""
+	}
+}
+
+// EachBudget calls fn for every budget loaded in memory, passing owner scope info.
+func (gs *LocalGovernanceStore) EachBudget(fn func(budgetID string, currentUsage, maxLimit float64, ownerScopeType, ownerScopeID string)) {
+	gs.budgets.Range(func(key, value any) bool {
+		b, ok := value.(*configstoreTables.TableBudget)
+		if ok && b != nil {
+			scopeType, scopeID := ownerScopeFromBudget(b)
+			fn(key.(string), b.CurrentUsage, b.MaxLimit, scopeType, scopeID)
+		}
+		return true
+	})
+}
+
+// ownerScopeFromRateLimit derives the alert-rule scope type and ID from a rate limit's FK columns.
+func ownerScopeFromRateLimit(rl *configstoreTables.TableRateLimit) (scopeType, scopeID string) {
+	switch {
+	case rl.VirtualKeyID != nil:
+		return "virtual_key", *rl.VirtualKeyID
+	case rl.TeamID != nil:
+		return "team", *rl.TeamID
+	case rl.CustomerID != nil:
+		return "customer", *rl.CustomerID
+	default:
+		return "global", ""
+	}
+}
+
+// EachRateLimit calls fn for every rate limit loaded in memory, passing owner scope info.
+func (gs *LocalGovernanceStore) EachRateLimit(fn func(rateLimitID string, tokenCurrentUsage, tokenMaxLimit int64, ownerScopeType, ownerScopeID string)) {
+	gs.rateLimits.Range(func(key, value any) bool {
+		rl, ok := value.(*configstoreTables.TableRateLimit)
+		if ok && rl != nil && rl.TokenMaxLimit != nil {
+			scopeType, scopeID := ownerScopeFromRateLimit(rl)
+			fn(key.(string), rl.TokenCurrentUsage, *rl.TokenMaxLimit, scopeType, scopeID)
+		}
+		return true
+	})
+}
+
+// EachRequestLimit calls fn for every rate limit that has a request-limit configured,
+// passing owner scope info.
+func (gs *LocalGovernanceStore) EachRequestLimit(fn func(rateLimitID string, requestCurrentUsage, requestMaxLimit int64, ownerScopeType, ownerScopeID string)) {
+	gs.rateLimits.Range(func(key, value any) bool {
+		rl, ok := value.(*configstoreTables.TableRateLimit)
+		if ok && rl != nil && rl.RequestMaxLimit != nil {
+			scopeType, scopeID := ownerScopeFromRateLimit(rl)
+			fn(key.(string), rl.RequestCurrentUsage, *rl.RequestMaxLimit, scopeType, scopeID)
+		}
+		return true
+	})
 }
 
 // DATABASE METHODS

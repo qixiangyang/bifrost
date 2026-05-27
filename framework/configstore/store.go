@@ -256,6 +256,7 @@ type ConfigStore interface {
 
 	// Model config CRUD
 	GetModelConfigs(ctx context.Context) ([]tables.TableModelConfig, error)
+	GetProviderGovernanceModelConfigs(ctx context.Context) ([]tables.TableModelConfig, error) // returns the wildcard "all models on a provider"
 	GetModelConfigsPaginated(ctx context.Context, params ModelConfigsQueryParams) ([]tables.TableModelConfig, int64, error)
 	GetModelConfig(ctx context.Context, scope string, scopeID *string, modelName string, provider *string) (*tables.TableModelConfig, error)
 	GetModelConfigByID(ctx context.Context, id string) (*tables.TableModelConfig, error)

@@ -343,6 +343,30 @@ A tool must be in **both** `ToolsToExecute` and `ToolsToAutoExecute` to be auto-
 }
 ```
 
+### Per-MCP-Client Tool Manager Overrides
+
+The four MCP-wide tool-manager knobs (`mcp_tool_execution_timeout`, `mcp_agent_depth`, `mcp_code_mode_binding_level`, `mcp_disable_auto_tool_inject`) on the global client config apply to every MCP server. To override any of them for a specific server, nest a `tool_manager_config` block on that server's config:
+
+| Field                     | Type             | Notes                                                                          |
+| ------------------------- | ---------------- | ------------------------------------------------------------------------------ |
+| `tool_execution_timeout`  | integer / string | Per-server timeout. Integer = seconds, string = Go duration (e.g. `"2m"`)      |
+| `max_agent_depth`         | integer          | Per-server [agent-mode](./agent-mode) recursion depth                          |
+| `code_mode_binding_level` | string           | `"server"` or `"tool"` — overrides global [code mode](./code-mode) binding     |
+| `disable_auto_tool_inject`| boolean          | When `true`, this server's tools are not auto-injected into inference requests |
+
+```json
+{
+  "name": "filesystem",
+  "connection_type": "stdio",
+  "tool_manager_config": {
+    "tool_execution_timeout": "2m",
+    "disable_auto_tool_inject": true
+  }
+}
+```
+
+If a field is absent from the per-server `tool_manager_config`, it inherits the global value. The global `mcp_*` flags on `client_config` are still supported and act as the default for every server that doesn't override.
+
 ---
 
 ## Environment Variables

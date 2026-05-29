@@ -16,6 +16,7 @@ export type TimeRange = {
 
 interface DatePickerWithRangeProps extends React.HTMLAttributes<HTMLDivElement> {
 	buttonClassName?: string;
+	buttonLabel?: string;
 	triggerLabel?: string;
 	onTrigger?: (
 		e: React.MouseEvent<HTMLButtonElement>,
@@ -42,7 +43,7 @@ interface DateTimePickerWithRangeProps extends DatePickerWithRangeProps {
 }
 
 export function DateTimePickerWithRange(props: DateTimePickerWithRangeProps) {
-	const { className, buttonClassName, triggerLabel, onTrigger, dateTime } = props;
+	const { className, buttonClassName, buttonLabel, triggerLabel, onTrigger, dateTime } = props;
 	const [date, setDate] = React.useState<DateRange | undefined>(dateTime);
 	const [timeValue, setTimeValue] = React.useState<TimeRange>({
 		from: dateTime?.from ? { hour: dateTime.from.getHours(), minute: dateTime.from.getMinutes() } : { hour: 0, minute: 0 },
@@ -124,7 +125,9 @@ export function DateTimePickerWithRange(props: DateTimePickerWithRangeProps) {
 						)}
 					>
 						<CalendarIcon className="h-4 w-4" strokeWidth={1.5} />
-						{predefinedPeriod ? (
+						{buttonLabel ? (
+							<span>{buttonLabel}</span>
+						) : predefinedPeriod ? (
 							<span>{props.preDefinedPeriods?.find((p) => p.value === predefinedPeriod)?.label}</span>
 						) : (
 							<>

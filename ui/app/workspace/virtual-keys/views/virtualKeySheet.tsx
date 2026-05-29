@@ -18,7 +18,7 @@ import {
 } from "@/components/ui/alertDialog";
 import { AsyncMultiSelect } from "@/components/ui/asyncMultiselect";
 import { Button } from "@/components/ui/button";
-import { DateTimePicker } from "@/components/ui/datePickerWithRange";
+import { DateTimePickerWithRange } from "@/components/ui/datePickerWithRange";
 import { ComboboxSelect } from "@/components/ui/combobox";
 import { ConfigSyncAlert } from "@/components/ui/configSyncAlert";
 import {
@@ -95,7 +95,7 @@ import {
 import { RbacOperation, RbacResource, useRbac } from "@enterprise/lib";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useNavigate } from "@tanstack/react-router";
-import { formatDistanceToNow } from "date-fns";
+import { format } from "date-fns";
 import { Info, Lock, RotateCcw, Trash2, Users, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
@@ -164,7 +164,7 @@ const formSchema = z
     teamId: z.string().optional(),
     customerId: z.string().optional(),
     isActive: z.boolean(),
-    expiresAt: z.string().nullable().optional(), // ISO 8601 datetime-local string, or null to clear
+    expiresAt: z.string().nullable().optional(), // ISO 8601 local datetime string, or null to clear
     deleteAfterExpiry: z.boolean(),
     // Budget
     budgetCalendarAligned: z.boolean(),
@@ -223,13 +223,11 @@ const pad2 = (n: number) => n.toString().padStart(2, "0");
 const toDatetimeLocal = (d: Date) =>
   `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 
-const presetFromNow = (offsetMs: number) => toDatetimeLocal(new Date(Date.now() + offsetMs));
-
 const EXPIRY_PRESETS = [
-  { label: "30 min", ms: 30 * 60_000 },
-  { label: "1 hour", ms: 60 * 60_000 },
-  { label: "24 hours", ms: 24 * 60 * 60_000 },
-  { label: "7 days", ms: 7 * 24 * 60 * 60_000 },
+  { label: "30 min", value: "30m", ms: 30 * 60_000 },
+  { label: "1 hour", value: "1h", ms: 60 * 60_000 },
+  { label: "24 hours", value: "24h", ms: 24 * 60 * 60_000 },
+  { label: "7 days", value: "7d", ms: 7 * 24 * 60 * 60_000 },
 ] as const;
 
 interface ExpiryFieldProps {
@@ -238,31 +236,16 @@ interface ExpiryFieldProps {
 }
 
 function ExpiryPickerField({ value, onChange }: ExpiryFieldProps) {
-  const summary = value
-    ? formatDistanceToNow(new Date(value), { addSuffix: true })
-    : null;
+  const [selectedPreset, setSelectedPreset] = useState<string | undefined>();
+  const expiryDate = value ? new Date(value) : undefined;
+  const expiryRange = expiryDate ? { from: new Date(), to: expiryDate } : undefined;
 
   return (
     <FormItem>
-      <div className="flex items-center justify-between">
-        <FormLabel>Expiry</FormLabel>
-        {value && (
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            onClick={() => onChange(null)}
-          >
-            Clear
-          </Button>
-        )}
-      </div>
+      <FormLabel>Expiry</FormLabel>
       <p className="text-muted-foreground text-xs">
         Leave empty for a key that never expires.
       </p>
-      {summary && (
-        <p className="text-sm font-medium">{summary}</p>
-      )}
       <div className="flex flex-wrap gap-1.5">
         <Button
           type="button"
@@ -272,24 +255,24 @@ function ExpiryPickerField({ value, onChange }: ExpiryFieldProps) {
         >
           Never
         </Button>
-        {EXPIRY_PRESETS.map(({ label, ms }) => (
-          <Button
-            key={label}
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => onChange(presetFromNow(ms))}
-          >
-            {label}
-          </Button>
-        ))}
-        <DateTimePicker
-          buttonVariant="outline"
+        <DateTimePickerWithRange
           buttonClassName="h-8 text-sm px-3"
-          buttonLabel="Custom"
-          dateTime={value ? new Date(value) : undefined}
+          buttonLabel={expiryDate ? format(expiryDate, "LLL dd, y h:mm a") : "Custom"}
+          dateTime={expiryRange}
           disabledBefore={new Date()}
-          onDateTimeUpdate={(dt) => onChange(toDatetimeLocal(dt))}
+          preDefinedPeriods={EXPIRY_PRESETS.map(({ label, value }) => ({ label, value }))}
+          predefinedPeriod={selectedPreset}
+          onDateTimeUpdate={(range) => {
+            setSelectedPreset(undefined);
+            const nextExpiry = range.to ?? range.from;
+            if (nextExpiry) onChange(toDatetimeLocal(nextExpiry));
+          }}
+          onPredefinedPeriodChange={(periodValue) => {
+            const preset = EXPIRY_PRESETS.find((period) => period.value === periodValue);
+            if (!preset) return;
+            setSelectedPreset(periodValue);
+            onChange(toDatetimeLocal(new Date(Date.now() + preset.ms)));
+          }}
         />
       </div>
       <FormMessage />

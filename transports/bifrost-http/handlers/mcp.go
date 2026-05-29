@@ -75,6 +75,7 @@ func (h *MCPHandler) RegisterRoutes(r *router.Router, middlewares ...schemas.Bif
 	r.POST("/api/mcp/client/{id}/reconnect", lib.ChainMiddlewares(h.reconnectMCPClient, middlewares...))
 	r.POST("/api/mcp/client/{id}/complete-oauth", lib.ChainMiddlewares(h.completeMCPClientOAuth, middlewares...))
 	r.POST("/api/mcp/client/{id}/initiate-verification", lib.ChainMiddlewares(h.initiateMCPClientVerification, middlewares...))
+	r.POST("/api/mcp/client/{id}/verify-headers", lib.ChainMiddlewares(h.verifyMCPClientHeaders, middlewares...))
 }
 
 // runOAuthBootstrap kicks off the shared-OAuth flow for an MCP client and
@@ -190,6 +191,122 @@ func (h *MCPHandler) initiateMCPClientVerification(ctx *fasthttp.RequestCtx) {
 		"expires_at":      flowInitiation.ExpiresAt,
 		"mcp_client_id":   clientConfig.ID,
 		"status_url":      statusURL,
+	})
+}
+
+// VerifyMCPClientHeadersRequest is the body for
+// POST /api/mcp/client/{id}/verify-headers. user_headers carries the
+// admin's sample header values for the one-time verification; the values
+// are used to open an upstream connection, call tools/list, and are then
+// discarded. Each end-user submits their own values at runtime.
+type VerifyMCPClientHeadersRequest struct {
+	UserHeaders map[string]string `json:"user_headers"`
+}
+
+// verifyMCPClientHeaders handles
+// POST /api/mcp/client/{id}/verify-headers.
+//
+// Surfaced on per-user-headers MCP clients sitting in pending_verification
+// — i.e. clients whose row was declared in config.json (or otherwise
+// persisted) without DiscoveredTools. The admin enters sample header
+// values in the UI form; this handler runs the same VerifyHeadersConnection
+// the UI Create flow runs (admin sample values → upstream connection →
+// tools/list → discovered tools), persists DiscoveredTools on the row,
+// triggers reconnect, and discards the sample values.
+//
+// Synchronous: no callback, no popup. On success the client transitions
+// to connected; on failure the row stays in pending_verification and the
+// admin can retry.
+func (h *MCPHandler) verifyMCPClientHeaders(ctx *fasthttp.RequestCtx) {
+	if h.store.ConfigStore == nil {
+		SendError(ctx, fasthttp.StatusServiceUnavailable, "MCP operations unavailable: config store is disabled")
+		return
+	}
+	bifrostCtx, cancel := lib.ConvertToBifrostContext(ctx, h.store)
+	defer cancel()
+
+	id, err := getIDFromCtx(ctx)
+	if err != nil {
+		SendError(ctx, fasthttp.StatusBadRequest, fmt.Sprintf("Invalid mcp client id: %v", err))
+		return
+	}
+
+	var req VerifyMCPClientHeadersRequest
+	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
+		SendError(ctx, fasthttp.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
+		return
+	}
+
+	clientConfig, err := h.store.ConfigStore.GetMCPClientConfigByID(ctx, id)
+	if err != nil {
+		if errors.Is(err, configstore.ErrNotFound) {
+			SendError(ctx, fasthttp.StatusNotFound, fmt.Sprintf("MCP client '%s' not found", id))
+			return
+		}
+		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("Failed to load MCP client: %v", err))
+		return
+	}
+	if clientConfig.AuthType != schemas.MCPAuthTypePerUserHeaders {
+		SendError(ctx, fasthttp.StatusBadRequest, fmt.Sprintf("verify-headers only applies to auth_type='per_user_headers' clients, got %q", clientConfig.AuthType))
+		return
+	}
+	// Replay guard: once admin verification succeeds DiscoveredTools is
+	// non-empty and the client is usable. A second hit on this endpoint
+	// would re-run discovery and clobber the existing tool set, which is
+	// surprising and wasteful. Force callers to delete + recreate (or use
+	// the future "edit headers schema" path) to re-verify.
+	if len(clientConfig.DiscoveredTools) > 0 {
+		SendError(ctx, fasthttp.StatusConflict, "MCP client has already been verified; delete and recreate to re-verify")
+		return
+	}
+	if len(clientConfig.PerUserHeaderKeys) == 0 {
+		SendError(ctx, fasthttp.StatusBadRequest, "MCP client has no per_user_header_keys declared; cannot verify")
+		return
+	}
+
+	// Canonicalize both sides so the missing-keys check matches by
+	// canonical form (lowercase + trim), mirroring the UI Create flow.
+	canonKeys := mcputils.CanonicalizeHeaderKeys(clientConfig.PerUserHeaderKeys)
+	canonUserHeaders := mcputils.CanonicalizeHeaderMap(req.UserHeaders)
+	if missing := missingPerUserHeaderValues(canonKeys, canonUserHeaders); len(missing) > 0 {
+		SendError(ctx, fasthttp.StatusBadRequest, fmt.Sprintf("user_headers missing values for required keys: %s", strings.Join(missing, ", ")))
+		return
+	}
+
+	tools, toolNameMapping, verifyErr := h.mcpManager.VerifyHeadersConnection(bifrostCtx, clientConfig, canonUserHeaders)
+	if verifyErr != nil {
+		SendError(ctx, fasthttp.StatusUnprocessableEntity, fmt.Sprintf("Verification failed: %v", verifyErr))
+		return
+	}
+
+	clientConfig.DiscoveredTools = tools
+	clientConfig.DiscoveredToolNameMapping = toolNameMapping
+
+	// Persist the discovered tools via UpdateMCPClientConfig (ConfigHash
+	// empty, so only the explicitly-set fields are written — no clobbering
+	// of name / tool_pricing / etc).
+	updateReq := &configstoreTables.TableMCPClient{
+		ClientID:                  clientConfig.ID,
+		DiscoveredTools:           clientConfig.DiscoveredTools,
+		DiscoveredToolNameMapping: clientConfig.DiscoveredToolNameMapping,
+	}
+	if err := h.store.ConfigStore.UpdateMCPClientConfig(ctx, clientConfig.ID, updateReq); err != nil {
+		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("Failed to persist discovered tools: %v", err))
+		return
+	}
+
+	// Reconnect: the per-call branch of AddClient will now restore
+	// DiscoveredTools and flip the state to connected.
+	if err := h.updateMCPClientConnectionWithRetry(bifrostCtx, clientConfig.ID, clientConfig); err != nil {
+		logger.Error(fmt.Sprintf("Failed to reconnect MCP client after headers verification for client %s: %v", clientConfig.ID, err))
+		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("Verified successfully but failed to reconnect: %v", err))
+		return
+	}
+
+	SendJSON(ctx, map[string]any{
+		"status":      "success",
+		"message":     fmt.Sprintf("MCP client verified. %d tools discovered. Each user will submit their own header values on first tool use.", len(tools)),
+		"tools_count": len(tools),
 	})
 }
 

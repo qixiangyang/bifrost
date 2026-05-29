@@ -822,6 +822,9 @@ func triggerMigrations(ctx context.Context, db *gorm.DB) error {
 	if err := migrationAddVirtualKeyExpiresAtColumn(ctx, db); err != nil {
 		return err
 	}
+	if err := migrationAddVirtualKeyDeleteAfterExpiryColumn(ctx, db); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -8962,6 +8965,36 @@ func migrationAddAdditionalAttributesToPricing(ctx context.Context, db *gorm.DB)
 	}})
 	if err := m.Migrate(); err != nil {
 		return fmt.Errorf("error running add_additional_attributes_to_pricing migration: %s", err.Error())
+	}
+	return nil
+}
+
+// migrationAddVirtualKeyDeleteAfterExpiryColumn adds delete_after_expiry to governance_virtual_keys.
+// Default false: existing VKs are never auto-deleted unless explicitly opted in.
+func migrationAddVirtualKeyDeleteAfterExpiryColumn(ctx context.Context, db *gorm.DB) error {
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: "add_virtual_key_delete_after_expiry_column",
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			if !tx.Migrator().HasColumn(&tables.TableVirtualKey{}, "delete_after_expiry") {
+				if err := tx.Exec("ALTER TABLE governance_virtual_keys ADD COLUMN delete_after_expiry BOOLEAN NOT NULL DEFAULT FALSE").Error; err != nil {
+					return fmt.Errorf("failed to add delete_after_expiry column to governance_virtual_keys: %w", err)
+				}
+			}
+			return nil
+		},
+		Rollback: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			if tx.Migrator().HasColumn(&tables.TableVirtualKey{}, "delete_after_expiry") {
+				if err := tx.Exec("ALTER TABLE governance_virtual_keys DROP COLUMN delete_after_expiry").Error; err != nil {
+					return fmt.Errorf("failed to drop delete_after_expiry column from governance_virtual_keys: %w", err)
+				}
+			}
+			return nil
+		},
+	}})
+	if err := m.Migrate(); err != nil {
+		return fmt.Errorf("error running add_virtual_key_delete_after_expiry_column migration: %s", err.Error())
 	}
 	return nil
 }

@@ -74,7 +74,8 @@ export interface VirtualKey {
 	customer_id?: string;
 	rate_limit_id?: string;
 	is_active: boolean;
-	expires_at?: string | null; // ISO 8601 UTC timestamp; null or absent means never expires
+	expires_at?: string | null;       // ISO 8601 UTC timestamp; null or absent means never expires
+	delete_after_expiry?: boolean;    // When true, sweeper deletes VK after expiry
 	calendar_aligned?: boolean;
 	created_at: string;
 	updated_at: string;
@@ -165,7 +166,8 @@ export interface CreateVirtualKeyRequest {
 	rate_limit?: CreateRateLimitRequest;
 	is_active?: boolean;
 	calendar_aligned?: boolean;
-	expires_at?: string | null; // ISO 8601 UTC timestamp; omit or null for no expiry
+	expires_at?: string | null;    // ISO 8601 UTC timestamp; omit or null for no expiry
+	delete_after_expiry?: boolean; // When true, sweeper deletes VK after expiry
 }
 
 export interface UpdateVirtualKeyRequest {
@@ -180,8 +182,9 @@ export interface UpdateVirtualKeyRequest {
 	is_active?: boolean;
 	calendar_aligned?: boolean;
 	reset_budget_usage?: boolean;
-	expires_at?: string | null;    // ISO 8601 UTC timestamp; omit to leave unchanged
-	clear_expires_at?: boolean;    // true to remove an existing expiry (mutually exclusive with expires_at)
+	expires_at?: string | null;       // ISO 8601 UTC timestamp; omit to leave unchanged
+	clear_expires_at?: boolean;       // true to remove an existing expiry (mutually exclusive with expires_at)
+	delete_after_expiry?: boolean;    // nil means "leave unchanged"
 }
 
 export interface BulkRotateVirtualKeysRequest {

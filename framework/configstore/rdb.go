@@ -2779,7 +2779,7 @@ func (s *RDBConfigStore) UpdateVirtualKey(ctx context.Context, virtualKey *table
 	} else {
 		virtualKey.ID = existing.ID
 		if err := txDB.WithContext(ctx).
-			Select("name", "description", "value", "is_active", "expires_at", "team_id", "customer_id", "rate_limit_id", "calendar_aligned", "config_hash", "updated_at", "encryption_status", "value_hash").
+			Select("name", "description", "value", "is_active", "expires_at", "delete_after_expiry", "team_id", "customer_id", "rate_limit_id", "calendar_aligned", "config_hash", "updated_at", "encryption_status", "value_hash").
 			Updates(virtualKey).Error; err != nil {
 			return s.parseGormError(err)
 		}
@@ -2935,6 +2935,20 @@ func (s *RDBConfigStore) DeleteVirtualKey(ctx context.Context, id string, tx ...
 		return err
 	}
 	return nil
+}
+
+// GetExpiredVirtualKeysForCleanup returns VKs where delete_after_expiry=true and expires_at <= now.
+// Only ID and Value are selected — the sweeper needs the ID to delete and Value to evict from cache.
+func (s *RDBConfigStore) GetExpiredVirtualKeysForCleanup(ctx context.Context) ([]tables.TableVirtualKey, error) {
+	var vks []tables.TableVirtualKey
+	err := s.DB().WithContext(ctx).
+		Select("id", "value", "encryption_status").
+		Where("delete_after_expiry = ? AND expires_at IS NOT NULL AND expires_at <= ?", true, time.Now().UTC()).
+		Find(&vks).Error
+	if err != nil {
+		return nil, err
+	}
+	return vks, nil
 }
 
 // GetVirtualKeyProviderConfigs retrieves all virtual key provider configs from the database.

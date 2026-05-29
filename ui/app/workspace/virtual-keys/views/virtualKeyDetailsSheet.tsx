@@ -215,6 +215,16 @@ export default function VirtualKeyDetailSheet({
                   </div>
                 </div>
               )}
+              {virtualKey.expires_at && (
+                <div className="grid grid-cols-3 items-center gap-4">
+                  <span className="text-muted-foreground text-sm">
+                    Delete after expiry
+                  </span>
+                  <div className="col-span-2 text-sm">
+                    {virtualKey.delete_after_expiry ? "Yes" : "No"}
+                  </div>
+                </div>
+              )}
 
               <div className="grid grid-cols-3 items-center gap-4">
                 <span className="text-muted-foreground text-sm">Created</span>

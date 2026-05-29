@@ -230,6 +230,9 @@ func Init(
 		disableAutoToolInject: disableAutoToolInject,
 		inMemoryStore:         inMemoryStore,
 	}
+	if configStore != nil {
+		plugin.startExpiredVKSweeper()
+	}
 	return plugin, nil
 }
 
@@ -323,6 +326,9 @@ func InitFromStore(
 		requiredHeaders:       requiredHeaders,
 		isEnterprise:          config != nil && config.IsEnterprise,
 		disableAutoToolInject: disableAutoToolInject,
+	}
+	if configStore != nil {
+		plugin.startExpiredVKSweeper()
 	}
 	return plugin, nil
 }
@@ -1775,6 +1781,54 @@ func (p *GovernancePlugin) PreMCPConnectionHook(ctx *schemas.BifrostContext, req
 // PreMCPConnectionHook is dispatched by the plugin pipeline.
 func (p *GovernancePlugin) PostMCPConnectionHook(ctx *schemas.BifrostContext, resp *schemas.BifrostMCPConnectResponse, bifrostErr *schemas.BifrostError) (*schemas.BifrostMCPConnectResponse, *schemas.BifrostError, error) {
 	return resp, bifrostErr, nil
+}
+
+const expiredVKSweeperInterval = 60 * time.Second
+
+// startExpiredVKSweeper launches a background goroutine that periodically deletes VKs
+// where delete_after_expiry=true and expires_at has passed. It uses p.wg and p.ctx so
+// it stops cleanly when Cleanup cancels the context.
+func (p *GovernancePlugin) startExpiredVKSweeper() {
+	p.wg.Add(1)
+	go func() {
+		defer p.wg.Done()
+		ticker := time.NewTicker(expiredVKSweeperInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				p.sweepExpiredVirtualKeys()
+			case <-p.ctx.Done():
+				return
+			}
+		}
+	}()
+}
+
+// sweepExpiredVirtualKeys queries for VKs with delete_after_expiry=true whose expiry has
+// passed, deletes them from the DB via the existing configstore path, and evicts them from
+// the in-memory governance store. This runs off the request path — no request blocking.
+func (p *GovernancePlugin) sweepExpiredVirtualKeys() {
+	expired, err := p.configStore.GetExpiredVirtualKeysForCleanup(p.ctx)
+	if err != nil {
+		p.logger.Error("expired VK sweeper: failed to query expired keys: %v", err)
+		return
+	}
+	if len(expired) == 0 {
+		return
+	}
+	deleted := 0
+	for _, vk := range expired {
+		if err := p.configStore.DeleteVirtualKey(p.ctx, vk.ID); err != nil {
+			p.logger.Error("expired VK sweeper: failed to delete VK %s: %v", vk.ID, err)
+			continue
+		}
+		p.store.DeleteVirtualKeyInMemory(p.ctx, vk.ID)
+		deleted++
+	}
+	if deleted > 0 {
+		p.logger.Info("expired VK sweeper: deleted %d expired virtual key(s)", deleted)
+	}
 }
 
 // Cleanup shuts down all components gracefully

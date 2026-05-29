@@ -99,6 +99,7 @@ type CreateVirtualKeyRequest struct {
 	IsActive          *bool                   `json:"is_active,omitempty"`
 	CalendarAligned   bool                    `json:"calendar_aligned,omitempty"`    // When true, all budgets reset at clean calendar boundaries
 	ExpiresAt         *time.Time              `json:"expires_at,omitempty"`          // Optional expiry; nil means never expires
+	ExpiresIn         *string                 `json:"expires_in,omitempty"`          // Optional preset expiry duration: 30m, 1d, 7d, 30d
 	DeleteAfterExpiry bool                    `json:"delete_after_expiry,omitempty"` // When true, sweeper deletes VK after expiry
 }
 
@@ -129,11 +130,31 @@ type UpdateVirtualKeyRequest struct {
 	CalendarAligned   *bool                        `json:"calendar_aligned,omitempty"` // When true, all budgets reset at clean calendar boundaries
 	ResetBudgetUsage  *bool                        `json:"reset_budget_usage,omitempty"`
 	ExpiresAt         *time.Time                   `json:"expires_at,omitempty"`          // Set a new expiry; nil means "leave unchanged"
+	ExpiresIn         *string                      `json:"expires_in,omitempty"`          // Set expiry from preset duration: 30m, 1d, 7d, 30d
 	ClearExpiresAt    bool                         `json:"clear_expires_at,omitempty"`    // true to remove an existing expiry (also clears delete_after_expiry)
 	DeleteAfterExpiry *bool                        `json:"delete_after_expiry,omitempty"` // nil means "leave unchanged"
 }
 
 var errVirtualKeyDualAssociation = errors.New("VirtualKey cannot be attached to both Team and Customer")
+
+var virtualKeyExpiryDurations = map[string]time.Duration{
+	"30m": 30 * time.Minute,
+	"1d":  24 * time.Hour,
+	"7d":  7 * 24 * time.Hour,
+	"30d": 30 * 24 * time.Hour,
+}
+
+func resolveVirtualKeyExpiresIn(value *string) (*time.Time, error) {
+	if value == nil {
+		return nil, nil
+	}
+	duration, ok := virtualKeyExpiryDurations[*value]
+	if !ok {
+		return nil, fmt.Errorf("expires_in must be one of: 30m, 1d, 7d, 30d")
+	}
+	expiresAt := time.Now().UTC().Add(duration)
+	return &expiresAt, nil
+}
 
 // optionalJSONStringHasValue reports whether a presence-aware string contains a non-empty value.
 func optionalJSONStringHasValue(value schemas.OptionalJSON[string]) bool {
@@ -623,6 +644,18 @@ func (h *GovernanceHandler) createVirtualKey(ctx *fasthttp.RequestCtx) {
 			seenDurations[b.ResetDuration] = true
 		}
 	}
+	if req.ExpiresAt != nil && req.ExpiresIn != nil {
+		SendError(ctx, 400, "cannot set both expires_at and expires_in")
+		return
+	}
+	resolvedExpiresAt, err := resolveVirtualKeyExpiresIn(req.ExpiresIn)
+	if err != nil {
+		SendError(ctx, 400, err.Error())
+		return
+	}
+	if resolvedExpiresAt != nil {
+		req.ExpiresAt = resolvedExpiresAt
+	}
 	// Validate expires_at: must be in the future if provided
 	if req.ExpiresAt != nil {
 		now := time.Now().UTC()
@@ -898,9 +931,25 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	// Validate mutually exclusive ExpiresAt and ClearExpiresAt
+	if req.ExpiresAt != nil && req.ExpiresIn != nil {
+		SendError(ctx, 400, "cannot set both expires_at and expires_in")
+		return
+	}
+	if req.ClearExpiresAt && req.ExpiresIn != nil {
+		SendError(ctx, 400, "cannot set both expires_in and clear_expires_at")
+		return
+	}
 	if req.ExpiresAt != nil && req.ClearExpiresAt {
 		SendError(ctx, 400, "cannot set both expires_at and clear_expires_at")
 		return
+	}
+	resolvedExpiresAt, err := resolveVirtualKeyExpiresIn(req.ExpiresIn)
+	if err != nil {
+		SendError(ctx, 400, err.Error())
+		return
+	}
+	if resolvedExpiresAt != nil {
+		req.ExpiresAt = resolvedExpiresAt
 	}
 	// Validate expires_at: must be in the future if provided
 	if req.ExpiresAt != nil {

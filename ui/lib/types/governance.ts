@@ -167,6 +167,7 @@ export interface CreateVirtualKeyRequest {
 	is_active?: boolean;
 	calendar_aligned?: boolean;
 	expires_at?: string | null;    // ISO 8601 UTC timestamp; omit or null for no expiry
+	expires_in?: "30m" | "1d" | "7d" | "30d"; // Server-side expiry preset
 	delete_after_expiry?: boolean; // When true, sweeper deletes VK after expiry
 }
 
@@ -183,6 +184,7 @@ export interface UpdateVirtualKeyRequest {
 	calendar_aligned?: boolean;
 	reset_budget_usage?: boolean;
 	expires_at?: string | null;       // ISO 8601 UTC timestamp; omit to leave unchanged
+	expires_in?: "30m" | "1d" | "7d" | "30d"; // Server-side expiry preset
 	clear_expires_at?: boolean;       // true to remove an existing expiry (mutually exclusive with expires_at)
 	delete_after_expiry?: boolean;    // nil means "leave unchanged"
 }

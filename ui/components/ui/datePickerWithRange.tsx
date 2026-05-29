@@ -275,6 +275,10 @@ interface DateTimePickerProps extends React.HTMLAttributes<HTMLDivElement> {
 	buttonVariant?: "default" | "outline" | "ghost" | "secondary";
 	/** When provided, always shown as the button label instead of the formatted date. */
 	buttonLabel?: string;
+	quickOptions?: { label: string; value: string; getDate: () => Date }[];
+	quickOptionValue?: string;
+	onQuickOptionChange?: (value: string, dateTime: Date) => void;
+	numberOfMonths?: number;
 	triggerLabel?: string;
 	onTrigger?: (e: React.MouseEvent<HTMLButtonElement>, dateTime: { date?: Date; time: TimeValue }) => void;
 	popupAlignment?: "start" | "end" | "center";
@@ -368,7 +372,7 @@ export function DateTimePicker(props: DateTimePickerProps) {
 								disabled={disabledDateRange}
 								defaultMonth={date}
 								selected={date}
-								numberOfMonths={2}
+								numberOfMonths={props.numberOfMonths ?? 2}
 								onSelect={(selectedDate) => {
 									if (!selectedDate) return;
 									setDate(selectedDate);
@@ -400,6 +404,28 @@ export function DateTimePicker(props: DateTimePickerProps) {
 								</div>
 							</div>
 						</div>
+						{props.quickOptions && (
+							<div className="flex w-[150px] flex-col gap-1 border-l py-2 pr-3 pl-2">
+								{props.quickOptions.map((option) => (
+									<Button
+										className={cn("w-full text-start text-sm", props.quickOptionValue === option.value && "bg-primary text-primary-foreground")}
+										variant="ghost"
+										key={option.value}
+										onClick={(e) => {
+											e.preventDefault();
+											e.stopPropagation();
+											const nextDate = option.getDate();
+											setDate(nextDate);
+											setTimeValue({ hour: nextDate.getHours(), minute: nextDate.getMinutes() });
+											props.onDateTimeUpdate && props.onDateTimeUpdate(nextDate);
+											props.onQuickOptionChange && props.onQuickOptionChange(option.value, nextDate);
+										}}
+									>
+										{option.label}
+									</Button>
+								))}
+							</div>
+						)}
 					</div>
 					{triggerLabel && onTrigger && (
 						<div className="mt-1 mb-2 flex w-full px-3">

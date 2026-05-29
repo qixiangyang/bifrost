@@ -18,7 +18,7 @@ import {
 } from "@/components/ui/alertDialog";
 import { AsyncMultiSelect } from "@/components/ui/asyncMultiselect";
 import { Button } from "@/components/ui/button";
-import { DateTimePickerWithRange } from "@/components/ui/datePickerWithRange";
+import { DateTimePicker } from "@/components/ui/datePickerWithRange";
 import { ComboboxSelect } from "@/components/ui/combobox";
 import { ConfigSyncAlert } from "@/components/ui/configSyncAlert";
 import {
@@ -165,6 +165,7 @@ const formSchema = z
     customerId: z.string().optional(),
     isActive: z.boolean(),
     expiresAt: z.string().nullable().optional(), // ISO 8601 local datetime string, or null to clear
+    expiresIn: z.enum(["30m", "1d", "7d", "30d"]).nullable().optional(),
     deleteAfterExpiry: z.boolean(),
     // Budget
     budgetCalendarAligned: z.boolean(),
@@ -225,20 +226,20 @@ const toDatetimeLocal = (d: Date) =>
 
 const EXPIRY_PRESETS = [
   { label: "30 min", value: "30m", ms: 30 * 60_000 },
-  { label: "1 hour", value: "1h", ms: 60 * 60_000 },
-  { label: "24 hours", value: "24h", ms: 24 * 60 * 60_000 },
+  { label: "1 day", value: "1d", ms: 24 * 60 * 60_000 },
   { label: "7 days", value: "7d", ms: 7 * 24 * 60 * 60_000 },
+  { label: "30 days", value: "30d", ms: 30 * 24 * 60 * 60_000 },
 ] as const;
 
 interface ExpiryFieldProps {
   value: string | null | undefined;
-  onChange: (v: string | null) => void;
+  presetValue?: "30m" | "1d" | "7d" | "30d" | null;
+  onChange: (v: string | null, preset?: "30m" | "1d" | "7d" | "30d" | null) => void;
 }
 
-function ExpiryPickerField({ value, onChange }: ExpiryFieldProps) {
-  const [selectedPreset, setSelectedPreset] = useState<string | undefined>();
+function ExpiryPickerField({ value, presetValue, onChange }: ExpiryFieldProps) {
+  const [selectedPreset, setSelectedPreset] = useState<"30m" | "1d" | "7d" | "30d" | undefined>(presetValue ?? undefined);
   const expiryDate = value ? new Date(value) : undefined;
-  const expiryRange = expiryDate ? { from: new Date(), to: expiryDate } : undefined;
 
   return (
     <FormItem>
@@ -251,27 +252,33 @@ function ExpiryPickerField({ value, onChange }: ExpiryFieldProps) {
           type="button"
           variant={!value ? "secondary" : "outline"}
           size="sm"
-          onClick={() => onChange(null)}
+          onClick={() => {
+            setSelectedPreset(undefined);
+            onChange(null, null);
+          }}
         >
           Never
         </Button>
-        <DateTimePickerWithRange
+        <DateTimePicker
+          buttonVariant="outline"
           buttonClassName="h-8 text-sm px-3"
           buttonLabel={expiryDate ? format(expiryDate, "LLL dd, y h:mm a") : "Custom"}
-          dateTime={expiryRange}
+          dateTime={expiryDate}
           disabledBefore={new Date()}
-          preDefinedPeriods={EXPIRY_PRESETS.map(({ label, value }) => ({ label, value }))}
-          predefinedPeriod={selectedPreset}
-          onDateTimeUpdate={(range) => {
-            setSelectedPreset(undefined);
-            const nextExpiry = range.to ?? range.from;
-            if (nextExpiry) onChange(toDatetimeLocal(nextExpiry));
+          numberOfMonths={1}
+          quickOptions={EXPIRY_PRESETS.map(({ label, value, ms }) => ({
+            label,
+            value,
+            getDate: () => new Date(Date.now() + ms),
+          }))}
+          quickOptionValue={selectedPreset}
+          onQuickOptionChange={(preset, dt) => {
+            setSelectedPreset(preset as "30m" | "1d" | "7d" | "30d");
+            onChange(toDatetimeLocal(dt), preset as "30m" | "1d" | "7d" | "30d");
           }}
-          onPredefinedPeriodChange={(periodValue) => {
-            const preset = EXPIRY_PRESETS.find((period) => period.value === periodValue);
-            if (!preset) return;
-            setSelectedPreset(periodValue);
-            onChange(toDatetimeLocal(new Date(Date.now() + preset.ms)));
+          onDateTimeUpdate={(dt) => {
+            setSelectedPreset(undefined);
+            onChange(toDatetimeLocal(dt), null);
           }}
         />
       </div>
@@ -398,6 +405,7 @@ export default function VirtualKeySheet({
               .slice(0, 16);
           })()
         : null,
+      expiresIn: null,
       budgets:
         virtualKey?.budgets && virtualKey.budgets.length > 0
           ? virtualKey.budgets.map((b) => ({
@@ -924,12 +932,14 @@ export default function VirtualKeySheet({
         // Only include expiry fields when the user actually changed the expiry field.
         // Pre-filled defaultValues are not dirty, so an unchanged expired key won't
         // resend its old expired timestamp and cause the backend to reject the edit.
-        const expiryChanged = !!form.formState.dirtyFields.expiresAt;
+        const expiryChanged = !!form.formState.dirtyFields.expiresAt || !!form.formState.dirtyFields.expiresIn;
         const deleteAfterExpiryChanged = !!form.formState.dirtyFields.deleteAfterExpiry;
         const clearingExpiry = expiryChanged && !data.expiresAt && !!virtualKey?.expires_at;
         const expiryPayload = expiryChanged
           ? data.expiresAt
-            ? { expires_at: new Date(data.expiresAt).toISOString() }
+            ? data.expiresIn
+              ? { expires_in: data.expiresIn }
+              : { expires_at: new Date(data.expiresAt).toISOString() }
             : virtualKey?.expires_at
               ? { clear_expires_at: true }
               : {}
@@ -1034,7 +1044,7 @@ export default function VirtualKeySheet({
           // Optional expiry: send as UTC ISO string, or omit for no expiry
           ...(data.expiresAt
             ? {
-                expires_at: new Date(data.expiresAt).toISOString(),
+                ...(data.expiresIn ? { expires_in: data.expiresIn } : { expires_at: new Date(data.expiresAt).toISOString() }),
                 ...(data.deleteAfterExpiry ? { delete_after_expiry: true } : {}),
               }
             : {}),
@@ -1234,8 +1244,10 @@ export default function VirtualKeySheet({
                     render={({ field }) => (
                       <ExpiryPickerField
                         value={field.value}
-                        onChange={(v) => {
+                        presetValue={form.watch("expiresIn")}
+                        onChange={(v, preset) => {
                           field.onChange(v);
+                          form.setValue("expiresIn", preset ?? null, { shouldDirty: true });
                           if (!v) form.setValue("deleteAfterExpiry", false, { shouldDirty: true });
                         }}
                       />

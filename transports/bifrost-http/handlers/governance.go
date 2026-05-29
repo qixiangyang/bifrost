@@ -662,7 +662,7 @@ func (h *GovernanceHandler) createVirtualKey(ctx *fasthttp.RequestCtx) {
 			IsActive:          isActive,
 			CalendarAligned:   req.CalendarAligned,
 			ExpiresAt:         req.ExpiresAt,
-			DeleteAfterExpiry: req.ExpiresAt != nil && req.DeleteAfterExpiry,
+			DeleteAfterExpiry: req.DeleteAfterExpiry,
 		}
 		if req.RateLimit != nil {
 			rateLimit := configstoreTables.TableRateLimit{

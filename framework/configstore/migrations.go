@@ -9000,7 +9000,7 @@ func migrationAddVirtualKeyDeleteAfterExpiryColumn(ctx context.Context, db *gorm
 }
 
 // migrationAddVirtualKeyExpiresAtColumn adds nullable expires_at to governance_virtual_keys.
-// No index: expiry is checked in-memory from the already-loaded VK, never queried by column.
+// No index: request-time expiry checks are in-memory; cleanup scans opt-in expired keys periodically off the request path.
 func migrationAddVirtualKeyExpiresAtColumn(ctx context.Context, db *gorm.DB) error {
 	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
 		ID: "add_virtual_key_expires_at_column",

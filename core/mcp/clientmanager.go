@@ -366,6 +366,29 @@ func (m *MCPManager) AddClient(requestCtx context.Context, config *schemas.MCPCl
 		return nil
 	}
 
+	// Shared-OAuth clients with PendingOAuthConfig set carry the inline
+	// `oauth_config` block from config.json but have no oauth_configs row
+	// or token yet. Attempting to connect would fail in ConnectionHeaders
+	// → GetAccessToken. Park them in pending_verification until an admin
+	// completes the browser OAuth flow via
+	// POST /api/mcp/client/{id}/initiate-verification. PendingOAuthConfig
+	// is cleared once the OAuth callback marks the linked oauth_configs
+	// row authorized; the subsequent reconnect skips this branch and
+	// connectToMCPClient runs normally.
+	if config.AuthType == schemas.MCPAuthTypeOauth && config.PendingOAuthConfig != nil {
+		m.mu.Lock()
+		if client, exists := m.clientMap[config.ID]; exists {
+			if config.ConnectionString != nil {
+				url := config.ConnectionString.GetValue()
+				client.ConnectionInfo.ConnectionURL = &url
+			}
+			client.State = schemas.MCPConnectionStatePendingVerification
+		}
+		m.mu.Unlock()
+		m.logger.Debug("%s Shared-OAuth MCP client '%s' registered in pending_verification (awaiting admin authorization)", MCPLogPrefix, config.Name)
+		return nil
+	}
+
 	// Connect using the copied config
 	if err := m.connectToMCPClient(requestCtx, configCopy); err != nil {
 		// Clean up the failed entry — this is a user-initiated action (UI/API),

@@ -47,6 +47,16 @@ type TableMCPClient struct {
 	AllowOnAllVirtualKeys bool `gorm:"default:false" json:"allow_on_all_virtual_keys"` // Whether to allow the MCP client to run on all virtual keys
 	Disabled              bool `gorm:"default:false" json:"disabled"`                  // Whether the client is intentionally disabled
 
+	// PendingOAuthConfigJSON stashes the inline `oauth_config` block from
+	// config.json for shared-OAuth MCP clients (auth_type='oauth') that have
+	// not yet been authorized by an admin. NULL on UI-created clients and on
+	// rows whose OAuth has already been authorized — cleared by the OAuth
+	// callback once oauth_configs.status='authorized'.
+	//
+	// Deserialised into PendingOAuthConfig by AfterFind; serialised back by
+	// BeforeSave. Wire-side it surfaces as `oauth_config` (UI form parity).
+	PendingOAuthConfigJSON *string `gorm:"type:text" json:"-"`
+
 	// Config hash is used to detect the changes synced from config.json file
 	// Every time we sync the config.json file, we will update the config hash
 	ConfigHash string `gorm:"type:varchar(255);null" json:"config_hash"`
@@ -67,6 +77,7 @@ type TableMCPClient struct {
 	DiscoveredTools           map[string]schemas.ChatTool `gorm:"-" json:"-"`
 	DiscoveredToolNameMapping map[string]string           `gorm:"-" json:"-"`
 	PerUserHeaderKeys         []string                    `gorm:"-" json:"per_user_header_keys"`
+	PendingOAuthConfig        *schemas.OAuth2Config       `gorm:"-" json:"oauth_config,omitempty"` // Runtime mirror of PendingOAuthConfigJSON
 }
 
 // TableName sets the table name for each model
@@ -191,6 +202,20 @@ func (c *TableMCPClient) BeforeSave(tx *gorm.DB) error {
 		c.PerUserHeaderKeysJSON = ""
 	}
 
+	// Persist the inline `oauth_config` block. Rehydrated by AfterFind so
+	// the initiate-verification endpoint can feed it to InitiateOAuthFlow
+	// the same way the UI Create handler does.
+	if c.PendingOAuthConfig != nil {
+		data, err := json.Marshal(c.PendingOAuthConfig)
+		if err != nil {
+			return err
+		}
+		s := string(data)
+		c.PendingOAuthConfigJSON = &s
+	} else {
+		c.PendingOAuthConfigJSON = nil
+	}
+
 	// Encrypt sensitive fields after serialization.
 	// Always set EncryptionStatus when encryption is enabled so the startup
 	// batch pass does not re-process this row indefinitely.
@@ -290,6 +315,13 @@ func (c *TableMCPClient) AfterFind(tx *gorm.DB) error {
 		if err := sonic.Unmarshal([]byte(c.PerUserHeaderKeysJSON), &c.PerUserHeaderKeys); err != nil {
 			return err
 		}
+	}
+	if c.PendingOAuthConfigJSON != nil && *c.PendingOAuthConfigJSON != "" {
+		var cfg schemas.OAuth2Config
+		if err := sonic.Unmarshal([]byte(*c.PendingOAuthConfigJSON), &cfg); err != nil {
+			return err
+		}
+		c.PendingOAuthConfig = &cfg
 	}
 	return nil
 }

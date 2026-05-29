@@ -1294,6 +1294,14 @@ func GenerateMCPClientHash(m tables.TableMCPClient) (string, error) {
 		}
 	}
 
+	// Hash PendingOAuthConfig so edits to the inline `oauth_config` block
+	// in config.json drift the hash and trigger reconciliation. Use the
+	// persisted JSON column rather than the runtime struct because it
+	// round-trips deterministically.
+	if m.PendingOAuthConfigJSON != nil && *m.PendingOAuthConfigJSON != "" {
+		hash.Write([]byte(*m.PendingOAuthConfigJSON))
+	}
+
 	// will enable it in the future with a migration
 	// hash.Write([]byte("disabled:" + strconv.FormatBool(m.Disabled)))
 	return hex.EncodeToString(hash.Sum(nil)), nil

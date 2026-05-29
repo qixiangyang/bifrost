@@ -809,6 +809,10 @@ func (m *MockConfigStore) GetExpiredVirtualKeysForCleanup(ctx context.Context) (
 	return nil, nil
 }
 
+func (m *MockConfigStore) DeleteExpiredVirtualKey(ctx context.Context, id string) (bool, error) {
+	return true, nil
+}
+
 func (m *MockConfigStore) GetVirtualKey(ctx context.Context, id string) (*tables.TableVirtualKey, error) {
 	return nil, nil
 }

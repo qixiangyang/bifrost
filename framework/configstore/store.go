@@ -193,6 +193,7 @@ type ConfigStore interface {
 	UpdateVirtualKey(ctx context.Context, virtualKey *tables.TableVirtualKey, tx ...*gorm.DB) error
 	DeleteVirtualKey(ctx context.Context, id string, tx ...*gorm.DB) error
 	GetExpiredVirtualKeysForCleanup(ctx context.Context) ([]tables.TableVirtualKey, error)
+	DeleteExpiredVirtualKey(ctx context.Context, id string) (bool, error)
 
 	// Virtual key provider config CRUD
 	GetVirtualKeyProviderConfigs(ctx context.Context, virtualKeyID string) ([]tables.TableVirtualKeyProviderConfig, error)

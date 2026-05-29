@@ -2951,6 +2951,19 @@ func (s *RDBConfigStore) GetExpiredVirtualKeysForCleanup(ctx context.Context) ([
 	return vks, nil
 }
 
+// DeleteExpiredVirtualKey deletes a VK only if it still has delete_after_expiry=true and
+// expires_at <= now at the moment of deletion. Returns true if a row was deleted, false if
+// the VK was concurrently updated (expiry cleared or extended) before this call executed.
+func (s *RDBConfigStore) DeleteExpiredVirtualKey(ctx context.Context, id string) (bool, error) {
+	result := s.DB().WithContext(ctx).
+		Where("id = ? AND delete_after_expiry = ? AND expires_at IS NOT NULL AND expires_at <= ?", id, true, time.Now().UTC()).
+		Delete(&tables.TableVirtualKey{})
+	if result.Error != nil {
+		return false, result.Error
+	}
+	return result.RowsAffected > 0, nil
+}
+
 // GetVirtualKeyProviderConfigs retrieves all virtual key provider configs from the database.
 func (s *RDBConfigStore) GetVirtualKeyProviderConfigs(ctx context.Context, virtualKeyID string) ([]tables.TableVirtualKeyProviderConfig, error) {
 	var virtualKey tables.TableVirtualKey

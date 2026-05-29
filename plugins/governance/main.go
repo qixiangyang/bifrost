@@ -1819,8 +1819,13 @@ func (p *GovernancePlugin) sweepExpiredVirtualKeys() {
 	}
 	deleted := 0
 	for _, vk := range expired {
-		if err := p.configStore.DeleteVirtualKey(p.ctx, vk.ID); err != nil {
+		ok, err := p.configStore.DeleteExpiredVirtualKey(p.ctx, vk.ID)
+		if err != nil {
 			p.logger.Error("expired VK sweeper: failed to delete VK %s: %v", vk.ID, err)
+			continue
+		}
+		if !ok {
+			// VK was updated concurrently (expiry cleared or extended); skip eviction.
 			continue
 		}
 		p.store.DeleteVirtualKeyInMemory(p.ctx, vk.ID)

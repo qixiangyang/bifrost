@@ -115,9 +115,29 @@ If the verify fails, the call returns `422 Unprocessable Entity` with the upstre
 </Tab>
 <Tab title="config.json">
 
-File-based config is **not supported** for `per_user_headers`. Bifrost needs to run the one-time upstream verify with the admin's sample values during create, which can only happen via an interactive admin step (Web UI or API).
+Declare the client with `auth_type: "per_user_headers"` and the required header-name schema. The admin's sample values aren't included in config.json — they're collected by the UI when verification runs.
 
-If you want a declarative-ish setup, run the API create once with your sample values, then check the resulting `mcp_client_id` into your config to reference it from other parts of the system. The MCP client itself stays in Bifrost's database.
+```json
+{
+  "mcp": {
+    "client_configs": [
+      {
+        "name": "acme_api",
+        "connection_type": "http",
+        "connection_string": "https://api.acme.example.com/mcp",
+        "auth_type": "per_user_headers",
+        "per_user_header_keys": ["X-API-Key", "X-Tenant-ID"],
+        "headers": {
+          "X-Region": { "value": "us-east-1" }
+        },
+        "tools_to_execute": ["*"]
+      }
+    ]
+  }
+}
+```
+
+At boot the client lands in **`pending_verification`** state. From the MCP Gateway UI, open the client and click **Verify** — Bifrost opens the same sample-values dialog the Web UI Create flow uses. Submit values, the upstream verify runs, tools are discovered, the credentials are discarded, and the client transitions to `connected`.
 
 </Tab>
 </Tabs>

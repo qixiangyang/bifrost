@@ -631,6 +631,10 @@ func (h *GovernanceHandler) createVirtualKey(ctx *fasthttp.RequestCtx) {
 			return
 		}
 	}
+	if req.DeleteAfterExpiry && req.ExpiresAt == nil {
+		SendError(ctx, 400, "delete_after_expiry requires expires_at")
+		return
+	}
 	// Set defaults: nil means "use DB default (true)"
 	isActive := req.IsActive
 	if isActive == nil {
@@ -906,6 +910,10 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 			return
 		}
 	}
+	if req.ClearExpiresAt && req.DeleteAfterExpiry != nil && *req.DeleteAfterExpiry {
+		SendError(ctx, 400, "cannot set delete_after_expiry when clearing expires_at")
+		return
+	}
 	vk, err := h.configStore.GetVirtualKey(ctx, vkID)
 	if err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
@@ -965,11 +973,16 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 		if req.ClearExpiresAt {
 			vk.ExpiresAt = nil
 			vk.DeleteAfterExpiry = false
-		} else if req.ExpiresAt != nil {
-			vk.ExpiresAt = req.ExpiresAt
-		}
-		if req.DeleteAfterExpiry != nil {
-			vk.DeleteAfterExpiry = *req.DeleteAfterExpiry
+		} else {
+			if req.ExpiresAt != nil {
+				vk.ExpiresAt = req.ExpiresAt
+			}
+			if req.DeleteAfterExpiry != nil {
+				vk.DeleteAfterExpiry = *req.DeleteAfterExpiry
+			}
+			if vk.DeleteAfterExpiry && vk.ExpiresAt == nil {
+				return &badRequestError{err: fmt.Errorf("delete_after_expiry requires expires_at")}
+			}
 		}
 		if req.CalendarAligned != nil {
 			vk.CalendarAligned = *req.CalendarAligned

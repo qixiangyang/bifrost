@@ -1264,6 +1264,18 @@ func loadMCPConfig(ctx context.Context, config *Config, configData *ConfigData) 
 				logger.Warn("skipping MCP client config %q from config file: %v", c.Name, err)
 				continue
 			}
+			// OAuth-based auth types with no inline `oauth_config` and no
+			// existing oauth_config_id still need the bootstrap-pending
+			// marker so the client lands in pending_verification and the
+			// initiate-verification endpoint can run discovery + dynamic
+			// client registration off the connection_string at admin-click
+			// time. Synthesize an empty OAuth2Config so the runtime gate
+			// and the handler see the same shape they do when the block
+			// was provided.
+			if (c.AuthType == schemas.MCPAuthTypeOauth || c.AuthType == schemas.MCPAuthTypePerUserOauth) &&
+				c.PendingOAuthConfig == nil && c.OauthConfigID == nil {
+				c.PendingOAuthConfig = &schemas.OAuth2Config{}
+			}
 			valid = append(valid, c)
 		}
 		configData.MCP.ClientConfigs = valid

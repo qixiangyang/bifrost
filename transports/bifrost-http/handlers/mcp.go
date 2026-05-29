@@ -157,8 +157,8 @@ func (h *MCPHandler) initiateMCPClientVerification(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	if clientConfig.AuthType != schemas.MCPAuthTypeOauth {
-		SendError(ctx, fasthttp.StatusBadRequest, fmt.Sprintf("initiate-verification only applies to auth_type='oauth' clients, got %q", clientConfig.AuthType))
+	if clientConfig.AuthType != schemas.MCPAuthTypeOauth && clientConfig.AuthType != schemas.MCPAuthTypePerUserOauth {
+		SendError(ctx, fasthttp.StatusBadRequest, fmt.Sprintf("initiate-verification only applies to OAuth-based clients (oauth, per_user_oauth), got %q", clientConfig.AuthType))
 		return
 	}
 	if clientConfig.PendingOAuthConfig == nil {
@@ -1651,9 +1651,12 @@ func (h *MCPHandler) completeMCPClientOAuth(ctx *fasthttp.RequestCtx) {
 			return
 		}
 		// Gate the fallback to genuine bootstrap completions:
-		// 1. AuthType must be shared OAuth — per_user_oauth completions
-		//    route through a different verification path that treats the
-		//    upstream token as an admin temp credential and revokes it.
+		// 1. AuthType must be one of the OAuth-based types. The downstream
+		//    handler branches on AuthType to take the per-user verification
+		//    path (which treats the upstream token as an admin temp
+		//    credential and revokes it) vs the shared completion path.
+		//    per_user_headers and other non-OAuth types cannot complete
+		//    through this endpoint.
 		// 2. PendingOAuthConfigJSON must still be set — once cleared, the
 		//    client has already completed bootstrap, and any further hit
 		//    on complete-oauth with this oauth_config_id is a replay (the
@@ -1661,8 +1664,8 @@ func (h *MCPHandler) completeMCPClientOAuth(ctx *fasthttp.RequestCtx) {
 		//    bootstrap stash is gone because ClearMCPClientPendingOAuthConfig
 		//    ran). Reject with 409 so callers don't trigger redundant DB
 		//    writes + reconnects on an already-connected client.
-		if dbClient.AuthType != string(schemas.MCPAuthTypeOauth) {
-			SendError(ctx, fasthttp.StatusBadRequest, fmt.Sprintf("OAuth config does not match a shared-OAuth MCP client (auth_type=%q)", dbClient.AuthType))
+		if dbClient.AuthType != string(schemas.MCPAuthTypeOauth) && dbClient.AuthType != string(schemas.MCPAuthTypePerUserOauth) {
+			SendError(ctx, fasthttp.StatusBadRequest, fmt.Sprintf("OAuth config does not match an OAuth-based MCP client (auth_type=%q)", dbClient.AuthType))
 			return
 		}
 		if dbClient.PendingOAuthConfigJSON == nil || *dbClient.PendingOAuthConfigJSON == "" {

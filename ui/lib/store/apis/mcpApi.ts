@@ -156,6 +156,21 @@ export const mcpApi = baseApi.injectEndpoints({
 				method: "POST",
 			}),
 		}),
+
+		// Verify a pending_verification per_user_headers MCP client by submitting
+		// admin sample header values. Backend runs verify + discover synchronously,
+		// persists DiscoveredTools, and reconnects.
+		verifyMCPClientHeaders: builder.mutation<
+			{ status: string; message: string; tools_count: number },
+			{ id: string; userHeaders: Record<string, string> }
+		>({
+			query: ({ id, userHeaders }) => ({
+				url: `/mcp/client/${id}/verify-headers`,
+				method: "POST",
+				body: { user_headers: userHeaders },
+			}),
+			invalidatesTags: ["MCPClients"],
+		}),
 	}),
 });
 
@@ -169,4 +184,5 @@ export const {
 	useLazyGetOAuthConfigStatusQuery,
 	useCompleteOAuthFlowMutation,
 	useInitiateMCPClientVerificationMutation,
+	useVerifyMCPClientHeadersMutation,
 } = mcpApi;

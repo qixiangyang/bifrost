@@ -35,6 +35,7 @@ import {
 	useGetVirtualKeysQuery,
 	useInitiateMCPClientVerificationMutation,
 	useUpdateMCPClientMutation,
+	useVerifyMCPClientHeadersMutation,
 } from "@/lib/store";
 import { MCPClient, MCPVKConfig } from "@/lib/types/mcp";
 import { mcpClientUpdateSchema, type MCPClientUpdateSchema } from "@/lib/types/schemas";
@@ -46,6 +47,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { ChevronDown, ChevronRight, Info, Plus, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useForm } from "react-hook-form";
+import { MCPHeadersAuthorizer } from "./mcpHeadersAuthorizer";
 import { OAuth2Authorizer } from "./oauth2Authorizer";
 
 interface MCPClientSheetProps {
@@ -70,17 +72,25 @@ export default function MCPClientSheet({ mcpClient, onClose, onSubmitSuccess, on
 	const hasUpdateMCPClientAccess = useRbac(RbacResource.MCPGateway, RbacOperation.Update);
 	const [updateMCPClient, { isLoading: isUpdating }] = useUpdateMCPClientMutation();
 	const [initiateVerification, { isLoading: isInitiatingVerification }] = useInitiateMCPClientVerificationMutation();
+	const [verifyMCPClientHeaders] = useVerifyMCPClientHeadersMutation();
 
-	// Drives the OAuth2Authorizer dialog for a config.json-bootstrapped client
-	// sitting in pending_verification. The admin clicks Authorize → we hit
-	// initiate-verification → render the same popup-based flow the UI Create
-	// path uses.
+	// Drives the OAuth2Authorizer dialog for a config.json-bootstrapped OAuth
+	// client sitting in pending_verification.
 	const [bootstrapAuthorize, setBootstrapAuthorize] = useState<
 		| { authorizeUrl: string; oauthConfigId: string; mcpClientId: string }
 		| null
 	>(null);
+	// Drives the MCPHeadersAuthorizer dialog for a config.json-bootstrapped
+	// per_user_headers client sitting in pending_verification.
+	const [bootstrapHeadersOpen, setBootstrapHeadersOpen] = useState(false);
 
 	const handleStartBootstrap = useCallback(async () => {
+		// per_user_headers takes a synchronous form-based path; OAuth-based
+		// types kick off the existing browser flow.
+		if (mcpClient.config.auth_type === "per_user_headers") {
+			setBootstrapHeadersOpen(true);
+			return;
+		}
 		try {
 			const response = await initiateVerification(mcpClient.config.client_id).unwrap();
 			if (response.status === "pending_oauth" && response.authorize_url) {
@@ -94,7 +104,7 @@ export default function MCPClientSheet({ mcpClient, onClose, onSubmitSuccess, on
 			// Surfaces inline; the OAuth dialog only opens on success.
 			console.error("Failed to start MCP client verification", error);
 		}
-	}, [initiateVerification, mcpClient.config.client_id]);
+	}, [initiateVerification, mcpClient.config.client_id, mcpClient.config.auth_type]);
 
 	const [pendingNavDirection, setPendingNavDirection] = useState<"prev" | "next" | null>(null);
 
@@ -454,7 +464,7 @@ export default function MCPClientSheet({ mcpClient, onClose, onSubmitSuccess, on
 
 	return (
 		<>
-			<Sheet open onOpenChange={(open) => !open && !oauthFlow && !bootstrapAuthorize && onClose()}>
+			<Sheet open onOpenChange={(open) => !open && !oauthFlow && !bootstrapAuthorize && !bootstrapHeadersOpen && onClose()}>
 			<SheetContent className="flex w-full flex-col overflow-x-hidden pt-4 sm:max-w-[60%]">
 				<SheetHeader className="w-full p-0 px-8 py-4" showCloseButton={false} headerClassName="mb-0 sticky -top-4 bg-card z-10">
 					<div className="flex w-full items-center justify-between">
@@ -473,9 +483,9 @@ export default function MCPClientSheet({ mcpClient, onClose, onSubmitSuccess, on
 									>
 										{isInitiatingVerification
 											? "Starting…"
-											: mcpClient.config.auth_type === "per_user_oauth"
-												? "Verify"
-												: "Authorize"}
+											: mcpClient.config.auth_type === "oauth"
+												? "Authorize"
+												: "Verify"}
 									</Button>
 								)}
 							</SheetTitle>
@@ -483,7 +493,9 @@ export default function MCPClientSheet({ mcpClient, onClose, onSubmitSuccess, on
 								{mcpClient.state === "pending_verification"
 									? mcpClient.config.auth_type === "per_user_oauth"
 										? "This client was declared in config.json. A one-time admin test login is needed to verify the OAuth setup and discover tools — each user will authenticate individually afterward."
-										: "This client was declared in config.json and needs a one-time OAuth authorization before it can be used."
+										: mcpClient.config.auth_type === "per_user_headers"
+											? "This client was declared in config.json. Submit sample header values once to verify the connection and discover tools — each user will submit their own values afterward."
+											: "This client was declared in config.json and needs a one-time OAuth authorization before it can be used."
 									: "MCP server configuration and available tools"}
 							</SheetDescription>
 						</div>
@@ -1464,6 +1476,31 @@ export default function MCPClientSheet({ mcpClient, onClose, onSubmitSuccess, on
 					oauthConfigId={bootstrapAuthorize.oauthConfigId}
 					mcpClientId={bootstrapAuthorize.mcpClientId}
 					isPerUserOauth={mcpClient.config.auth_type === "per_user_oauth"}
+				/>
+			)}
+			{bootstrapHeadersOpen && (
+				<MCPHeadersAuthorizer
+					open={bootstrapHeadersOpen}
+					onClose={() => setBootstrapHeadersOpen(false)}
+					onSuccess={() => {
+						toast({
+							title: "Success",
+							description: "Headers verified successfully. Each user will submit their own values when using this MCP server.",
+						});
+						setBootstrapHeadersOpen(false);
+						onSubmitSuccess();
+						onClose();
+					}}
+					onError={(error) => {
+						toast({ title: "Verification failed", description: error, variant: "destructive" });
+					}}
+					perUserHeaderKeys={mcpClient.config.per_user_header_keys ?? []}
+					submitHandler={async (values) => {
+						await verifyMCPClientHeaders({
+							id: mcpClient.config.client_id,
+							userHeaders: values,
+						}).unwrap();
+					}}
 				/>
 			)}
 			</Sheet>

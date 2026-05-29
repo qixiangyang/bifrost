@@ -930,8 +930,10 @@ const ClientForm: React.FC<ClientFormProps> = ({ open, onClose, onSaved }) => {
 					onError={() => {
 						/* error toast handled by the dialog itself */
 					}}
-					payload={headersFlow.payload}
 					perUserHeaderKeys={perUserHeaderKeys}
+					submitHandler={async (values) => {
+						await createMCPClient({ ...headersFlow.payload, user_headers: values }).unwrap();
+					}}
 				/>
 			)}
 		</Sheet>

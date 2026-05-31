@@ -75,6 +75,26 @@ func (p *Plugin) PreRequestHook(ctx *schemas.BifrostContext, req *schemas.Bifros
 		return nil
 	}
 
+	// Respect the routing-allowlist set by an earlier plugin (e.g., governance VK governance):
+	// intersect catalog candidates with the allowlist so the VK's provider restrictions hold
+	// even when no earlier routing plugin set req.Provider.
+	if allowed, ok := ctx.Value(schemas.BifrostContextKeyRoutingAllowedProviders).([]schemas.ModelProvider); ok {
+		filtered := providers[:0:0]
+		for _, prov := range providers {
+			if slices.Contains(allowed, prov) {
+				filtered = append(filtered, prov)
+			}
+		}
+		providers = filtered
+		if len(providers) == 0 {
+			ctx.AppendRoutingEngineLog(schemas.RoutingEngineModelCatalog, schemas.LogLevelInfo, fmt.Sprintf(
+				"No catalog providers for model %s remain after routing-allowlist filter %v; leaving req.Provider empty",
+				model, allowed,
+			))
+			return nil
+		}
+	}
+
 	selected := providers[0]
 	if integrationType, ok := ctx.Value(schemas.BifrostContextKeyIntegrationType).(string); ok && integrationType != "" {
 		if integrationDefault, mapped := integrationTypeToDefaultProvider[integrationType]; mapped && integrationDefault != "" {

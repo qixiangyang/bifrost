@@ -92,6 +92,53 @@ func (h *WSRealtimeHandler) handleUpgrade(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
+	// Run PreRequestHook to give governance + LB a chance to route the realtime connection.
+	// Realtime bypasses handleRequest (per-turn pipelines instead), so we invoke the routing
+	// phase explicitly here. Mutations to provider/model are read back into the local vars
+	// and copied to fasthttp user values so snapshotRealtimeMiddlewareValues picks up any
+	// ctx changes (governance team/customer IDs, routing engine logs).
+	preReqCtx, preReqCancel := createBifrostContextFromAuth(h.handlerStore, auth)
+	preReqCtx.SetValue(schemas.BifrostContextKeyHTTPRequestType, schemas.RealtimeRequest)
+	if realtimeDefaultProviderForPath(path) == schemas.OpenAI {
+		preReqCtx.SetValue(schemas.BifrostContextKeyIntegrationType, "openai")
+	}
+	preReq := &schemas.BifrostRequest{
+		RequestType: schemas.RealtimeRequest,
+		ResponsesRequest: &schemas.BifrostResponsesRequest{
+			Provider: providerKey,
+			Model:    model,
+		},
+	}
+	if preReqErr := h.client.RunPreRequestHooks(preReqCtx, preReq); preReqErr != nil {
+		preReqCancel()
+		msg := "pre-request hook error"
+		if preReqErr.Error != nil && preReqErr.Error.Message != "" {
+			msg = preReqErr.Error.Message
+		}
+		upgrader := h.websocketUpgrader("")
+		upgradeErr := upgrader.Upgrade(ctx, func(conn *ws.Conn) {
+			defer conn.Close()
+			clientConn := newRealtimeClientConn(conn)
+			clientConn.writeRealtimeError(newRealtimeWireBifrostError(400, "invalid_request_error", msg))
+		})
+		if upgradeErr != nil {
+			logger.Warn("websocket upgrade failed for %s: %v", path, upgradeErr)
+		}
+		return
+	}
+	if routedProvider, routedModel, _ := preReq.GetRequestFields(); routedProvider != "" {
+		providerKey = routedProvider
+		if routedModel != "" {
+			model = routedModel
+		}
+	}
+	// Mirror ctx values back to fasthttp user values so snapshotRealtimeMiddlewareValues
+	// (called below) picks them up — same mechanism TransportInterceptorMiddleware uses.
+	for k, v := range preReqCtx.GetUserValues() {
+		ctx.SetUserValue(k, v)
+	}
+	preReqCancel()
+
 	provider := h.client.GetProviderByKey(providerKey)
 	rtProvider, ok := provider.(schemas.RealtimeProvider)
 	if provider == nil || !ok || !rtProvider.SupportsRealtimeAPI() {

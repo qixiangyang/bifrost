@@ -118,18 +118,22 @@ type GovernanceStore interface {
 	// Model-level governance checks
 	CheckModelBudget(ctx context.Context, request *EvaluationRequest, baselines map[string]float64) (Decision, error)
 	CheckModelRateLimit(ctx context.Context, request *EvaluationRequest, tokensBaselines map[string]int64, requestsBaselines map[string]int64) (Decision, error)
-	// Per-VK-scoped model-level governance checks (aggregate with the global model checks above)
-	CheckVirtualKeyScopedModelBudget(ctx context.Context, vk *configstoreTables.TableVirtualKey, request *EvaluationRequest, baselines map[string]float64) (Decision, error)
-	CheckVirtualKeyScopedModelRateLimit(ctx context.Context, vk *configstoreTables.TableVirtualKey, request *EvaluationRequest, tokensBaselines map[string]int64, requestsBaselines map[string]int64) (Decision, error)
+	// Scoped model-level governance checks (aggregate with the global model checks above).
+	// scope/scopeID identify the owning entity (e.g. "virtual_key" + VK.ID, or any other
+	// scope registered via tables.RegisterModelConfigScope). An empty scope or scopeID
+	// is a no-op (returns DecisionAllow).
+	CheckScopedModelBudget(ctx context.Context, scope, scopeID string, request *EvaluationRequest, baselines map[string]float64) (Decision, error)
+	CheckScopedModelRateLimit(ctx context.Context, scope, scopeID string, request *EvaluationRequest, tokensBaselines map[string]int64, requestsBaselines map[string]int64) (Decision, error)
 	// VK-level governance checks
 	CheckVirtualKeyBudget(ctx context.Context, vk *configstoreTables.TableVirtualKey, request *EvaluationRequest, baselines map[string]float64) (Decision, error)
 	CheckVirtualKeyRateLimit(ctx context.Context, vk *configstoreTables.TableVirtualKey, request *EvaluationRequest, tokensBaselines map[string]int64, requestsBaselines map[string]int64) (Decision, error)
 	// In-memory usage updates (for VK-level)
 	UpdateVirtualKeyBudgetUsageInMemory(ctx context.Context, vk *configstoreTables.TableVirtualKey, provider schemas.ModelProvider, cost float64) error
 	UpdateVirtualKeyRateLimitUsageInMemory(ctx context.Context, vk *configstoreTables.TableVirtualKey, provider schemas.ModelProvider, tokensUsed int64, shouldUpdateTokens bool, shouldUpdateRequests bool) error
-	// In-memory usage updates for per-VK-scoped model configs (mirror the global model updates)
-	UpdateVirtualKeyScopedModelBudgetUsageInMemory(ctx context.Context, vk *configstoreTables.TableVirtualKey, model string, provider schemas.ModelProvider, cost float64) error
-	UpdateVirtualKeyScopedModelRateLimitUsageInMemory(ctx context.Context, vk *configstoreTables.TableVirtualKey, model string, provider schemas.ModelProvider, tokensUsed int64, shouldUpdateTokens bool, shouldUpdateRequests bool) error
+	// In-memory usage updates for scoped model configs (mirror the global model updates).
+	// scope/scopeID identify the owning entity; an empty scope or scopeID is a no-op.
+	UpdateScopedModelBudgetUsageInMemory(ctx context.Context, scope, scopeID, model string, provider schemas.ModelProvider, cost float64) error
+	UpdateScopedModelRateLimitUsageInMemory(ctx context.Context, scope, scopeID, model string, provider schemas.ModelProvider, tokensUsed int64, shouldUpdateTokens bool, shouldUpdateRequests bool) error
 	// In-memory reset checks (return items that need DB sync)
 	ResetExpiredRateLimitsInMemory(ctx context.Context) []*configstoreTables.TableRateLimit
 	ResetExpiredBudgetsInMemory(ctx context.Context) []*configstoreTables.TableBudget
@@ -1313,11 +1317,11 @@ func (gs *LocalGovernanceStore) CheckModelRateLimit(ctx context.Context, request
 	return gs.CheckRateLimit(ctx, entityWiseRateLimits, tokensBaselines, requestsBaselines)
 }
 
-// CheckVirtualKeyScopedModelBudget enforces budgets from model configs scoped to the
-// request's virtual key. These are checked in addition to the global model budgets. A request
-// must satisfy both the global model config and any matching per-VK model config.
-func (gs *LocalGovernanceStore) CheckVirtualKeyScopedModelBudget(ctx context.Context, vk *configstoreTables.TableVirtualKey, request *EvaluationRequest, baselines map[string]float64) (Decision, error) {
-	if vk == nil {
+// CheckScopedModelBudget enforces budgets from model configs scoped to the given
+// (scope, scopeID) — e.g. ("virtual_key", vk.ID). Checked in addition to the global
+// model budgets; a request must satisfy both. Empty scope or scopeID is a no-op.
+func (gs *LocalGovernanceStore) CheckScopedModelBudget(ctx context.Context, scope, scopeID string, request *EvaluationRequest, baselines map[string]float64) (Decision, error) {
+	if scope == "" || scopeID == "" {
 		return DecisionAllow, nil
 	}
 	if baselines == nil {
@@ -1325,20 +1329,18 @@ func (gs *LocalGovernanceStore) CheckVirtualKeyScopedModelBudget(ctx context.Con
 	}
 	model, provider := modelAndProvider(request)
 	entityWiseBudgets := EntityWiseBudgets{}
-	for _, scope := range nonGlobalModelConfigScopeChain(vk) {
-		for _, mc := range gs.collectModelConfigsFor(ctx, scope.name, scope.id, model, provider) {
-			if budgets := gs.loadModelConfigBudgets(ctx, mc); len(budgets) > 0 {
-				entityWiseBudgets[modelConfigEntityKey(mc)] = budgets
-			}
+	for _, mc := range gs.collectModelConfigsFor(ctx, scope, scopeID, model, provider) {
+		if budgets := gs.loadModelConfigBudgets(ctx, mc); len(budgets) > 0 {
+			entityWiseBudgets[modelConfigEntityKey(mc)] = budgets
 		}
 	}
 	return gs.CheckBudget(ctx, entityWiseBudgets, baselines)
 }
 
-// CheckVirtualKeyScopedModelRateLimit enforces rate limits from model configs scoped to the
-// request's virtual key, in addition to the global model rate limits.
-func (gs *LocalGovernanceStore) CheckVirtualKeyScopedModelRateLimit(ctx context.Context, vk *configstoreTables.TableVirtualKey, request *EvaluationRequest, tokensBaselines map[string]int64, requestsBaselines map[string]int64) (Decision, error) {
-	if vk == nil {
+// CheckScopedModelRateLimit enforces rate limits from model configs scoped to the given
+// (scope, scopeID), in addition to the global model rate limits.
+func (gs *LocalGovernanceStore) CheckScopedModelRateLimit(ctx context.Context, scope, scopeID string, request *EvaluationRequest, tokensBaselines map[string]int64, requestsBaselines map[string]int64) (Decision, error) {
+	if scope == "" || scopeID == "" {
 		return DecisionAllow, nil
 	}
 	if tokensBaselines == nil {
@@ -1349,14 +1351,12 @@ func (gs *LocalGovernanceStore) CheckVirtualKeyScopedModelRateLimit(ctx context.
 	}
 	model, provider := modelAndProvider(request)
 	entityWiseRateLimits := make(EntityWiseRateLimits)
-	for _, scope := range nonGlobalModelConfigScopeChain(vk) {
-		for _, mc := range gs.collectModelConfigsFor(ctx, scope.name, scope.id, model, provider) {
-			if mc.RateLimitID == nil {
-				continue
-			}
-			if rateLimit := gs.LoadRateLimit(ctx, *mc.RateLimitID); rateLimit != nil {
-				entityWiseRateLimits[modelConfigEntityKey(mc)] = []*configstoreTables.TableRateLimit{rateLimit}
-			}
+	for _, mc := range gs.collectModelConfigsFor(ctx, scope, scopeID, model, provider) {
+		if mc.RateLimitID == nil {
+			continue
+		}
+		if rateLimit := gs.LoadRateLimit(ctx, *mc.RateLimitID); rateLimit != nil {
+			entityWiseRateLimits[modelConfigEntityKey(mc)] = []*configstoreTables.TableRateLimit{rateLimit}
 		}
 	}
 	return gs.CheckRateLimit(ctx, entityWiseRateLimits, tokensBaselines, requestsBaselines)
@@ -1473,11 +1473,11 @@ func (gs *LocalGovernanceStore) UpdateProviderAndModelRateLimitUsageInMemory(ctx
 	return nil
 }
 
-// UpdateVirtualKeyScopedModelBudgetUsageInMemory bumps budget usage for model configs scoped
-// to the request's virtual key. This is the post-response counterpart to
-// CheckVirtualKeyScopedModelBudget — without it, scoped budgets never increase and never trip.
-func (gs *LocalGovernanceStore) UpdateVirtualKeyScopedModelBudgetUsageInMemory(ctx context.Context, vk *configstoreTables.TableVirtualKey, model string, provider schemas.ModelProvider, cost float64) error {
-	if vk == nil || model == "" {
+// UpdateScopedModelBudgetUsageInMemory bumps budget usage for model configs scoped to the
+// given (scope, scopeID). Post-response counterpart to CheckScopedModelBudget — without it,
+// scoped budgets never increase and never trip. Empty scope/scopeID/model is a no-op.
+func (gs *LocalGovernanceStore) UpdateScopedModelBudgetUsageInMemory(ctx context.Context, scope, scopeID, model string, provider schemas.ModelProvider, cost float64) error {
+	if scope == "" || scopeID == "" || model == "" {
 		return nil
 	}
 	var providerStr *string
@@ -1485,22 +1485,20 @@ func (gs *LocalGovernanceStore) UpdateVirtualKeyScopedModelBudgetUsageInMemory(c
 		p := string(provider)
 		providerStr = &p
 	}
-	for _, scope := range nonGlobalModelConfigScopeChain(vk) {
-		for _, mc := range gs.collectModelConfigsFor(ctx, scope.name, scope.id, model, providerStr) {
-			for i := range mc.Budgets {
-				if err := gs.BumpBudgetUsage(ctx, mc.Budgets[i].ID, cost); err != nil {
-					return err
-				}
+	for _, mc := range gs.collectModelConfigsFor(ctx, scope, scopeID, model, providerStr) {
+		for i := range mc.Budgets {
+			if err := gs.BumpBudgetUsage(ctx, mc.Budgets[i].ID, cost); err != nil {
+				return err
 			}
 		}
 	}
 	return nil
 }
 
-// UpdateVirtualKeyScopedModelRateLimitUsageInMemory bumps rate limit counters for model configs
-// scoped to the request's virtual key. Post-response counterpart to CheckVirtualKeyScopedModelRateLimit.
-func (gs *LocalGovernanceStore) UpdateVirtualKeyScopedModelRateLimitUsageInMemory(ctx context.Context, vk *configstoreTables.TableVirtualKey, model string, provider schemas.ModelProvider, tokensUsed int64, shouldUpdateTokens bool, shouldUpdateRequests bool) error {
-	if vk == nil || model == "" {
+// UpdateScopedModelRateLimitUsageInMemory bumps rate limit counters for model configs scoped
+// to the given (scope, scopeID). Post-response counterpart to CheckScopedModelRateLimit.
+func (gs *LocalGovernanceStore) UpdateScopedModelRateLimitUsageInMemory(ctx context.Context, scope, scopeID, model string, provider schemas.ModelProvider, tokensUsed int64, shouldUpdateTokens bool, shouldUpdateRequests bool) error {
+	if scope == "" || scopeID == "" || model == "" {
 		return nil
 	}
 	var providerStr *string
@@ -1508,14 +1506,12 @@ func (gs *LocalGovernanceStore) UpdateVirtualKeyScopedModelRateLimitUsageInMemor
 		p := string(provider)
 		providerStr = &p
 	}
-	for _, scope := range nonGlobalModelConfigScopeChain(vk) {
-		for _, mc := range gs.collectModelConfigsFor(ctx, scope.name, scope.id, model, providerStr) {
-			if mc.RateLimitID == nil {
-				continue
-			}
-			if err := gs.BumpRateLimitUsage(ctx, *mc.RateLimitID, tokensUsed, shouldUpdateTokens, shouldUpdateRequests); err != nil {
-				return err
-			}
+	for _, mc := range gs.collectModelConfigsFor(ctx, scope, scopeID, model, providerStr) {
+		if mc.RateLimitID == nil {
+			continue
+		}
+		if err := gs.BumpRateLimitUsage(ctx, *mc.RateLimitID, tokensUsed, shouldUpdateTokens, shouldUpdateRequests); err != nil {
+			return err
 		}
 	}
 	return nil

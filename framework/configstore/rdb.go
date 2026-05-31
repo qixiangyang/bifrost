@@ -2953,12 +2953,6 @@ func (s *RDBConfigStore) DeleteVirtualKey(ctx context.Context, id string, tx ...
 			return err
 		}
 		for _, mc := range scopedModelConfigs {
-			// Owned budgets via ModelConfigID plus the legacy single BudgetID for safety.
-			for i := range mc.Budgets {
-				if err := txDB.WithContext(ctx).Delete(&tables.TableBudget{}, "id = ?", mc.Budgets[i].ID).Error; err != nil {
-					return err
-				}
-			}
 			if mc.BudgetID != nil {
 				if err := txDB.WithContext(ctx).Delete(&tables.TableBudget{}, "id = ?", *mc.BudgetID).Error; err != nil {
 					return err

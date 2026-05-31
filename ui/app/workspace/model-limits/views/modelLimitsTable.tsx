@@ -29,6 +29,10 @@ import { toast } from "sonner";
 import ModelLimitSheet from "./modelLimitSheet";
 import { ModelLimitsEmptyState } from "./modelLimitsEmptyState";
 import { getScopeLabel } from "@/lib/utils/labels";
+import { getModelLimitScope } from "@/lib/registries/modelLimitScopes";
+// Side-effect import: pull in downstream scope registrations (enterprise
+// "user" deep-link, etc.). No-op for OSS builds.
+import "@enterprise/lib/registrations/modelLimitScopes";
 import { useNavigate } from "@tanstack/react-router";
 
 // Helper to format reset duration for display
@@ -326,7 +330,10 @@ export default function ModelLimitsTable({
 																<Badge
 																	variant="secondary"
 																	className="flex max-w-[160px] cursor-pointer items-center gap-1 hover:opacity-80"
-																	onClick={() => navigate({ to: "/workspace/governance/virtual-keys", search: { vk: config.scope_id } })}
+																	onClick={() => {
+																		const target = getModelLimitScope(config.scope ?? "global")?.buildDeepLink?.(config.scope_id!);
+																		if (target) navigate(target as never);
+																	}}
 																>
 																	<span className="truncate">{config.scope_name}</span>
 																	<ArrowUpRight className="h-3 w-3 shrink-0" />

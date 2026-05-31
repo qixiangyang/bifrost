@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bytedance/sonic"
@@ -56,12 +57,52 @@ type GovernanceManager interface {
 }
 
 // GovernanceHandler manages HTTP requests for governance operations
+// ScopeNameResolver returns the human-readable name for a non-global model
+// config scope target (e.g. a virtual key's Name given its ID). The second
+// return value is false when no name could be resolved; the UI then falls
+// back to rendering the raw scope_id. Implementations must be safe to call
+// concurrently.
+type ScopeNameResolver func(ctx context.Context, scopeID string) (string, bool)
+
+// scopeNameResolvers is the package-level registry consulted by
+// resolveModelConfigScopeName. OSS seeds it (virtual_key) the first time a
+// GovernanceHandler is constructed; downstream builds extend it via
+// RegisterScopeNameResolver at startup. Guarded by scopeNameResolversMu.
+var (
+	scopeNameResolversMu sync.RWMutex
+	scopeNameResolvers   = map[string]ScopeNameResolver{}
+)
+
+// RegisterScopeNameResolver wires a resolver for a model_config scope value.
+// Intended to be called once at process startup, before serving requests
+// (e.g. an enterprise build registering a "user" resolver). Overwrites any
+// previously registered resolver for the same scope. Safe to call
+// concurrently.
+func RegisterScopeNameResolver(scope string, fn ScopeNameResolver) {
+	if scope == "" || fn == nil {
+		return
+	}
+	scopeNameResolversMu.Lock()
+	scopeNameResolvers[scope] = fn
+	scopeNameResolversMu.Unlock()
+}
+
+func lookupScopeNameResolver(scope string) (ScopeNameResolver, bool) {
+	scopeNameResolversMu.RLock()
+	defer scopeNameResolversMu.RUnlock()
+	fn, ok := scopeNameResolvers[scope]
+	return fn, ok
+}
+
 type GovernanceHandler struct {
 	configStore       configstore.ConfigStore
 	governanceManager GovernanceManager
 }
 
-// NewGovernanceHandler creates a new governance handler instance
+// NewGovernanceHandler creates a new governance handler instance.
+// Side effect: ensures the default virtual_key scope-name resolver is
+// registered against the supplied configStore, so resolveModelConfigScopeName
+// can render VK names for OSS-only builds without further wiring.
 func NewGovernanceHandler(manager GovernanceManager, configStore configstore.ConfigStore) (*GovernanceHandler, error) {
 	if manager == nil {
 		return nil, fmt.Errorf("governance manager is required")
@@ -69,6 +110,13 @@ func NewGovernanceHandler(manager GovernanceManager, configStore configstore.Con
 	if configStore == nil {
 		return nil, fmt.Errorf("config store is required")
 	}
+	RegisterScopeNameResolver(configstoreTables.ModelConfigScopeVirtualKey, func(ctx context.Context, scopeID string) (string, bool) {
+		vk, err := configStore.GetVirtualKey(ctx, scopeID)
+		if err != nil || vk == nil {
+			return "", false
+		}
+		return vk.Name, true
+	})
 	return &GovernanceHandler{
 		governanceManager: manager,
 		configStore:       configStore,
@@ -2755,19 +2803,26 @@ func (h *GovernanceHandler) getModelConfig(ctx *fasthttp.RequestCtx) {
 }
 
 // resolveModelConfigScopeName populates the transient ScopeName for a single non-global
-// model config (currently resolves a virtual_key scope_id to the VK's name). The cache
-// lets callers dedupe lookups across many configs. Resolution failures are non-fatal.
+// model config by dispatching to the resolver registered for mc.Scope. Unknown scopes
+// (no resolver registered) and resolution failures are non-fatal — ScopeName stays empty
+// and the UI falls back to rendering the scope_id. The cache lets callers dedupe lookups
+// across many configs; it is keyed by (scope, scope_id) so distinct scopes never collide.
 func (h *GovernanceHandler) resolveModelConfigScopeName(ctx context.Context, mc *configstoreTables.TableModelConfig, cache map[string]string) {
-	if mc == nil || mc.Scope != configstoreTables.ModelConfigScopeVirtualKey || mc.ScopeID == nil {
+	if mc == nil || mc.Scope == "" || mc.ScopeID == nil {
+		return
+	}
+	resolver, ok := lookupScopeNameResolver(mc.Scope)
+	if !ok {
 		return
 	}
 	id := *mc.ScopeID
-	name, ok := cache[id]
-	if !ok {
-		if vk, err := h.configStore.GetVirtualKey(ctx, id); err == nil && vk != nil {
-			name = vk.Name
+	key := mc.Scope + "|" + id
+	name, cached := cache[key]
+	if !cached {
+		if resolved, found := resolver(ctx, id); found {
+			name = resolved
 		}
-		cache[id] = name
+		cache[key] = name
 	}
 	mc.ScopeName = name
 }

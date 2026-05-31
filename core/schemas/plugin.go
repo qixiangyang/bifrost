@@ -272,8 +272,11 @@ type LLMPlugin interface {
 	// request should be sent to. Plugins are free to mutate any field on req (Provider, Model,
 	// Fallbacks, Input, Params, Tools, ...) — unlike PreLLMHook, mutations made here are
 	// committed to the request and are observed by all subsequent plugins, the provider call,
-	// and every fallback attempt. There is no short-circuit; a non-nil error fails the request
-	// immediately without dispatching Pre/PostLLMHook.
+	// and every fallback attempt.
+	//
+	// Errors are non-blocking: they are logged as warnings by the pipeline and the next plugin
+	// runs. There is no short-circuit. The core validates req.Provider after all PreRequestHooks
+	// have run — an unresolved provider returns a 400 to the caller.
 	//
 	// Plugins that don't participate in routing should return nil.
 	PreRequestHook(ctx *BifrostContext, req *BifrostRequest) error

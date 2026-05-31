@@ -109,23 +109,7 @@ func (h *WSRealtimeHandler) handleUpgrade(ctx *fasthttp.RequestCtx) {
 			Model:    model,
 		},
 	}
-	if preReqErr := h.client.RunPreRequestHooks(preReqCtx, preReq); preReqErr != nil {
-		preReqCancel()
-		msg := "pre-request hook error"
-		if preReqErr.Error != nil && preReqErr.Error.Message != "" {
-			msg = preReqErr.Error.Message
-		}
-		upgrader := h.websocketUpgrader("")
-		upgradeErr := upgrader.Upgrade(ctx, func(conn *ws.Conn) {
-			defer conn.Close()
-			clientConn := newRealtimeClientConn(conn)
-			clientConn.writeRealtimeError(newRealtimeWireBifrostError(400, "invalid_request_error", msg))
-		})
-		if upgradeErr != nil {
-			logger.Warn("websocket upgrade failed for %s: %v", path, upgradeErr)
-		}
-		return
-	}
+	h.client.RunPreRequestHooks(preReqCtx, preReq)
 	if routedProvider, routedModel, _ := preReq.GetRequestFields(); routedProvider != "" {
 		providerKey = routedProvider
 		if routedModel != "" {

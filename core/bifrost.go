@@ -4124,6 +4124,26 @@ type RealtimeTurnHooks struct {
 	Cleanup        func()
 }
 
+// RunPreRequestHooks acquires a plugin pipeline and runs PreRequestHook on each LLM plugin
+// for callers that do not flow through handleRequest/handleStreamRequest — primarily realtime
+// WebSocket upgrades, where the upgrade itself is the routing decision (once per WS connection)
+// but the per-turn pipeline handles PreLLMHook/PostLLMHook separately.
+//
+// Mutations to req.Provider/req.Model/req.Fallbacks made by PreRequestHook plugins are committed
+// to the shared *BifrostRequest. A non-nil error from any plugin is returned as a BifrostError;
+// no Pre/PostLLMHook is dispatched in that case.
+func (bifrost *Bifrost) RunPreRequestHooks(ctx *schemas.BifrostContext, req *schemas.BifrostRequest) *schemas.BifrostError {
+	if ctx == nil {
+		ctx = bifrost.ctx
+	}
+	pipeline := bifrost.getPluginPipeline()
+	defer bifrost.releasePluginPipeline(pipeline)
+	if err := pipeline.RunPreRequestHooks(ctx, req); err != nil {
+		return newBifrostError(err)
+	}
+	return nil
+}
+
 // RunStreamPreHooks acquires a plugin pipeline, sets up tracing context, runs PreLLMHooks,
 // and returns a PostHookRunner for per-chunk post-processing.
 // Used by WebSocket handlers that bypass the normal inference path but still need plugin hooks.
@@ -4566,8 +4586,6 @@ func (bifrost *Bifrost) handleRequest(ctx *schemas.BifrostContext, req *schemas.
 		ctx = bifrost.ctx
 	}
 
-	bifrost.logger.Debug(fmt.Sprintf("primary provider %s with model %s and %d fallbacks", provider, model, len(fallbacks)))
-
 	// Try the primary provider first
 	ctx.SetValue(schemas.BifrostContextKeyFallbackIndex, 0)
 	// Ensure request ID is set in context before PreHooks
@@ -4575,6 +4593,30 @@ func (bifrost *Bifrost) handleRequest(ctx *schemas.BifrostContext, req *schemas.
 		requestID := uuid.New().String()
 		ctx.SetValue(schemas.BifrostContextKeyRequestID, requestID)
 	}
+
+	// PreRequestHook: once-per-request phase where plugins decide provider/model/fallbacks
+	// (and may mutate other request fields). Mutations commit to req and are observed by
+	// all downstream phases and fallbacks.
+	preReqPipeline := bifrost.getPluginPipeline()
+	if err := preReqPipeline.RunPreRequestHooks(ctx, req); err != nil {
+		bifrost.releasePluginPipeline(preReqPipeline)
+		bifrostErr := newBifrostError(err)
+		bifrostErr.PopulateExtraFields(req.RequestType, provider, model, model)
+		return nil, bifrostErr
+	}
+	bifrost.releasePluginPipeline(preReqPipeline)
+	// Re-read after PreRequestHook — provider/model/fallbacks may have changed.
+	provider, model, fallbacks = req.GetRequestFields()
+	// Empty provider after PreRequestHook means no plugin (ModelCatalogResolver included)
+	// could pick a provider for this model — the caller's input is unresolvable.
+	if provider == "" {
+		bifrostErr := newBifrostErrorFromMsg(fmt.Sprintf("provider is required: no provider could be resolved for model %q (set as provider/model or configure the model catalog)", model))
+		bifrostErr.PopulateExtraFields(req.RequestType, provider, model, model)
+		return nil, bifrostErr
+	}
+
+	bifrost.logger.Debug(fmt.Sprintf("primary provider %s with model %s and %d fallbacks", provider, model, len(fallbacks)))
+
 	primaryResult, primaryErr := bifrost.tryRequest(ctx, req)
 	if primaryErr != nil {
 		if primaryErr.Error != nil {
@@ -4668,7 +4710,41 @@ func (bifrost *Bifrost) handleStreamRequest(ctx *schemas.BifrostContext, req *sc
 		requestID := uuid.New().String()
 		ctx.SetValue(schemas.BifrostContextKeyRequestID, requestID)
 	}
+
+	// PreRequestHook: once-per-request phase. See handleRequest for semantics.
+	preReqPipeline := bifrost.getPluginPipeline()
+	if err := preReqPipeline.RunPreRequestHooks(ctx, req); err != nil {
+		bifrost.releasePluginPipeline(preReqPipeline)
+		bifrostErr := newBifrostError(err)
+		bifrostErr.PopulateExtraFields(req.RequestType, provider, model, model)
+		bifrostErr.StatusCode = schemas.Ptr(fasthttp.StatusBadRequest)
+		return nil, bifrostErr
+	}
+	bifrost.releasePluginPipeline(preReqPipeline)
+	// Re-read after PreRequestHook — provider/model/fallbacks may have changed.
+	provider, model, fallbacks = req.GetRequestFields()
+	// Empty provider after PreRequestHook means no plugin (ModelCatalogResolver included)
+	// could pick a provider for this model — the caller's input is unresolvable.
+	if provider == "" {
+		bifrostErr := newBifrostErrorFromMsg(fmt.Sprintf("provider is required: no provider could be resolved for model %q (set as provider/model or configure the model catalog)", model))
+		bifrostErr.PopulateExtraFields(req.RequestType, provider, model, model)
+		bifrostErr.StatusCode = schemas.Ptr(fasthttp.StatusBadRequest)
+		return nil, bifrostErr
+	}
+
+	bifrost.logger.Debug(fmt.Sprintf("primary provider %s with model %s and %d fallbacks", provider, model, len(fallbacks)))
+
 	primaryResult, primaryErr := bifrost.tryStreamRequest(ctx, req)
+	if primaryErr != nil {
+		if primaryErr.Error != nil {
+			bifrost.logger.Debug(fmt.Sprintf("primary provider %s with model %s returned error: %s", provider, model, primaryErr.Error.Message))
+		} else {
+			bifrost.logger.Debug(fmt.Sprintf("primary provider %s with model %s returned error: %v", provider, model, primaryErr))
+		}
+		if len(fallbacks) > 0 {
+			bifrost.logger.Debug(fmt.Sprintf("check if we should try %d fallbacks", len(fallbacks)))
+		}
+	}
 
 	// Check if we should proceed with fallbacks
 	shouldTryFallbacks := bifrost.shouldTryFallbacks(req, primaryErr)
@@ -6562,6 +6638,46 @@ func (p *PluginPipeline) RunLLMPreHooks(ctx *schemas.BifrostContext, req *schema
 		}
 	}
 	return req, nil, p.executedPreHooks
+}
+
+// RunPreRequestHooks executes PreRequestHook on each LLM plugin in registration order, once per
+// top-level request. Plugins mutate req.Provider, req.Model, req.Fallbacks (and any other field
+// they choose); mutations are committed to the shared *BifrostRequest and observed by every
+// subsequent plugin, the provider call, and every fallback attempt. There is no short-circuit —
+// a non-nil error from any plugin fails the request immediately without dispatching Pre/PostLLMHook.
+//
+// Per-request semantics: unlike PreLLMHook (which runs again on every fallback), PreRequestHook
+// runs exactly once at the top of handleRequest/handleStreamRequest, before any fan-out.
+func (p *PluginPipeline) RunPreRequestHooks(ctx *schemas.BifrostContext, req *schemas.BifrostRequest) error {
+	// If the skip plugin pipeline flag is set, skip the plugin pipeline
+	if skipPluginPipeline, ok := ctx.Value(schemas.BifrostContextKeySkipPluginPipeline).(bool); ok && skipPluginPipeline {
+		return nil
+	}
+	ctx.BlockRestrictedWrites()
+	defer ctx.UnblockRestrictedWrites()
+	for _, plugin := range p.llmPlugins {
+		pluginName := plugin.GetName()
+		p.logger.Debug("running pre-request hook for plugin %s", pluginName)
+		spanCtx, handle := p.tracer.StartSpan(ctx, fmt.Sprintf("plugin.%s.prerequesthook", sanitizeSpanName(pluginName)), schemas.SpanKindPlugin)
+		if spanCtx != nil {
+			if spanID, ok := spanCtx.Value(schemas.BifrostContextKeySpanID).(string); ok {
+				ctx.SetValue(schemas.BifrostContextKeySpanID, spanID)
+			}
+		}
+
+		pluginCtx := ctx.WithPluginScope(&pluginName)
+		err := plugin.PreRequestHook(pluginCtx, req)
+		pluginCtx.ReleasePluginScope()
+
+		if err != nil {
+			p.tracer.SetAttribute(handle, "error", err.Error())
+			p.tracer.EndSpan(handle, schemas.SpanStatusError, err.Error())
+			p.logger.Warn("error in PreRequestHook for plugin %s: %s", pluginName, err.Error())
+			return err
+		}
+		p.tracer.EndSpan(handle, schemas.SpanStatusOk, "")
+	}
+	return nil
 }
 
 // RunPostLLMHooks executes PostHooks in reverse order for the plugins whose PreLLMHook ran.
